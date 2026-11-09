@@ -49,6 +49,18 @@ class Release(unittest.TestCase):
         self.assertIn("does not match checksums.txt", r.stderr)
         self.assertEqual(self.run_sh(installed, "update", "nope").returncode, 2)
 
+    def test_update_refuses_to_downgrade_unless_pinned(self):
+        self.run_sh("sh", str(self.dist / "install.sh"))
+        init = self.tmp / f"home/ledger-{VERSION}/ledger/__init__.py"
+        init.write_text('__version__ = "10.0.0"\n')  # new length, so the cached .pyc is stale
+        installed = str(self.tmp / "bin/ledger")
+        r = self.run_sh(installed, "update")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn(f"latest is {VERSION}, you have 10.0.0", r.stderr)
+        r = self.run_sh(installed, "update", f"v{VERSION}")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.run_sh(installed, "version").stdout.strip(), VERSION)
+
 
 if __name__ == "__main__":
     unittest.main()

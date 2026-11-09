@@ -1,217 +1,109 @@
-"""Pure fold of the event log, plus views computed from state and observations."""
+"""Fold the event log into tasks and inbox items. Reads 0.2 logs too."""
 
-ROLES = ("lead", "reviewer")
-KINDS = ("tree", "commit", "diff")
-PRIORITIES = ("p0", "p1", "p2", "p3")
+STATES = ("todo", "active", "blocked", "review", "done", "dropped")
+FLOW = {
+    "todo": {"active", "dropped"},
+    "active": {"blocked", "review", "done", "dropped"},
+    "blocked": {"active", "dropped"},
+    "review": {"active", "done", "dropped"},
+    "done": {"active"},
+    "dropped": {"todo"},
+}
+ENDED = ("done", "dropped")
 
 
 class State:
     def __init__(self):
-        self.driver = None          # {"session", "reason"}
-        self.directory = {}         # actor -> Reason address
-        self.tasks = {}             # slug -> task dict
-        self.proofs = {}            # seq -> proof event
-        self.requests = {}          # seq -> request dict
-        self.request_ids = {}       # request_id -> event
-        self.events = []
+        self.tasks = {}    # id -> task
+        self.items = {}    # seq -> inbox item
+        self.history = {}  # task id -> events
 
-    # --- queries
-    def actor_for(self, keys):
-        """The actor bound to any of the caller's identity keys: open tasks first, then ended ones."""
-        keys = set(filter(None, keys))
-        if not keys:
-            return None
-        if self.driver and self.driver["session"] in keys:
-            return "driver"
-        tasks = sorted(self.tasks.values(), key=lambda t: t["status"] != "open")
-        for t in tasks:
-            for a in t["assign"].values():
-                if a["session"] in keys:
-                    return a["name"]
-        for e in reversed(self.events):  # a reassigned lead keeps its name, to be told to stop
-            if e["kind"] == "start" and (e.get("session") or e.get("block")) in keys:
-                return e["actor"]
-        return None
-
-    def open_tasks(self):
-        return [t for t in self.tasks.values() if t["status"] == "open"]
-
-    def roles_of(self, name, task):
-        return [r for r, a in task["assign"].items() if a["name"] == name]
-
-    def holder(self, task, role):
-        a = task["assign"].get(role)
-        return a["name"] if a else None
+    def inbox(self, name=None):
+        return [i for i in self.items.values() if i["status"] == "open" and (name is None or i["to"] == name)]
 
 
 def fold(events):
     s = State()
     for e in events:
-        s.events.append(e)
-        if e.get("request_id"):
-            s.request_ids[e["request_id"]] = e
-        _apply(s, e)
+        if e.get("v") == 3:
+            _apply(s, e)
+        else:
+            _apply_v2(s, e)
+        if e.get("task") in s.tasks:
+            s.tasks[e["task"]]["updated"] = e["at"]
+            s.history.setdefault(e["task"], []).append(e)
     return s
 
 
 def _apply(s, e):
     k = e["kind"]
-    actor = e.get("actor")
-    if e.get("reason") and actor and actor not in ("driver", "human"):
-        s.directory[actor] = e["reason"]
-    t = s.tasks.get(e.get("task"))
-    if t is not None:
-        t["rev"] = e["seq"]
-    if k in ("init", "driver"):
-        s.driver = {"session": e.get("session") or e.get("block"), "reason": e.get("reason")}
-    elif k == "hello" and actor == "driver":
-        s.driver["reason"] = e["reason"]
-    elif k == "new":
-        s.tasks[e["task"]] = {
-            "slug": e["task"], "title": e["title"], "area": e.get("area"), "priority": e.get("priority", "p2"),
-            "merge": e.get("merge", False), "base": e.get("base", "main"), "status": "open", "rev": e["seq"],
-            "seq": e["seq"], "reqs": {}, "assign": {}, "closed": None}
-        for r in e["reqs"]:
-            _add_req(s.tasks[e["task"]], r, e["seq"])
-        if e.get("from"):
-            s.requests[e["from"]]["settled"] = True
-    elif k == "prioritize":
-        t["priority"] = e["priority"]
-    elif k == "require":
-        _add_req(t, e["req"], e["seq"])
-    elif k == "waive":
-        t["reqs"][e["req"]]["waived"] = e["why"]
-        _drop_review_requests(s, t, e["req"])
-    elif k == "assign":
-        t["assign"][e["role"]] = {"name": e["name"], "branch": e["branch"], "cwd": e["cwd"], "seq": e["seq"],
-                                  "session": None, "brief": e.get("brief"), "token": e.get("token_sha"),
-                                  "launch": e.get("launch")}
-    elif k == "start":
-        t["assign"][e["role"]]["session"] = e.get("session") or e.get("block")
-    elif k == "prove":
-        s.proofs[e["seq"]] = dict(e, verdict=None)
-        req = t["reqs"][e["req"]]
-        if e["passed"]:
-            _drop_review_requests(s, t, e["req"])
-            req["proof"] = e["seq"]
-            s.requests[e["seq"]] = {"seq": e["seq"], "type": "review", "task": t["slug"], "to": "driver",
-                                    "from": actor, "status": "open", "blocking": True, "proof": e["seq"]}
-    elif k in ("accept", "reject"):
-        p = s.proofs[e["proof"]]
-        p["verdict"] = k
-        p["why"] = e.get("why")
-        s.requests[e["proof"]]["status"] = "done"
-    elif k in ("ask", "propose", "decide"):
-        s.requests[e["seq"]] = {
-            "seq": e["seq"], "type": k, "task": e.get("task"), "area": e.get("area"), "from": actor,
-            "from_role": e.get("from_role"), "to": e.get("to", {"propose": "driver", "decide": "human"}.get(k)),
-            "text": e.get("text") or e.get("question"), "blocking": e.get("blocking", False),
-            "options": e.get("options"), "option_notes": e.get("option_notes", {}), "recommend": e.get("recommend"), "merge": e.get("merge", False),
-            "candidate": e.get("candidate"), "attachments": e.get("attachments", []), "status": "open",
-            "answer": None, "settled": False}
-        if k == "decide" and e.get("from"):
-            s.requests[e["from"]]["status"] = "forwarded"
+    if k == "new":
+        _new(s, e, e.get("lead"))
+    elif k == "set":
+        _set(s, e, e["fields"])
+    elif k == "ask":
+        _ask(s, e, e["to"], e["text"], e.get("options", []))
     elif k == "answer":
-        s.requests[e["request"]].update(status="done", answer=e["text"])
-    elif k == "decision":
-        s.requests[e["request"]].update(status="done", answer={"option": e["option"], "why": e["why"]})
-    elif k in ("cancel", "decline"):
-        s.requests[e["request"]].update(status="cancelled" if k == "cancel" else "declined", answer=e.get("why"))
-    elif k == "settle":
-        s.requests[e["request"]]["settled"] = True
+        _answer(s, e, e["item"], e["text"])
+
+
+def _new(s, e, lead):
+    s.tasks[e["task"]] = {"id": e["task"], "title": e["title"], "state": "todo", "lead": lead,
+                          "fields": {}, "created": e["at"], "updated": e["at"]}
+
+
+def _set(s, e, fields):
+    t = s.tasks[e["task"]]
+    for key, value in fields.items():
+        if key in ("state", "lead", "title"):
+            t[key] = value or None
+        elif value:
+            t["fields"][key] = value
+        else:
+            t["fields"].pop(key, None)
+    if t["state"] in ENDED:
+        for i in s.items.values():
+            if i["task"] == t["id"] and i["status"] == "open":
+                i.update(status="closed", answer=f"task {t['state']}", by=e.get("actor"), answered=e["at"])
+
+
+def _ask(s, e, to, text, options):
+    s.items[e["seq"]] = {"n": e["seq"], "task": e.get("task"), "from": e.get("actor"), "to": to, "text": text,
+                         "options": options, "at": e["at"], "status": "open", "answer": None, "by": None}
+
+
+def _answer(s, e, n, text):
+    item = s.items.get(n)
+    if item and item["status"] == "open":
+        item.update(status="answered", answer=text, by=e.get("actor"), answered=e["at"])
+
+
+def _apply_v2(s, e):
+    """0.1/0.2 events: keep tasks, leads, lifecycle, and requests; drop proofs and identity."""
+    k, t = e["kind"], s.tasks.get(e.get("task"))
+    if k == "new":
+        _new(s, e, None)
+    elif k == "assign":
+        _set(s, e, {"lead" if e["role"] == "lead" else e["role"]: e["name"]})
+    elif k == "start" and t and t["state"] == "todo" and e.get("role") == "lead":
+        _set(s, e, {"state": "active"})
     elif k in ("close", "drop"):
-        t["status"] = "closed" if k == "close" else "dropped"
-        t["closed"] = {k2: e.get(k2) for k2 in ("candidate", "merged", "proofs", "why")}
-        for r in s.requests.values():
-            if r["task"] == t["slug"] and r["status"] == "open":
-                r["status"] = "cancelled"
-            if r["task"] == t["slug"] and r["type"] == "decide":
-                r["settled"] = True
-
-
-def _add_req(task, r, seq):
-    task["reqs"][r["id"]] = dict(r, rev=seq, waived=None, proof=None)
-
-
-def _drop_review_requests(s, task, req_id):
-    for r in s.requests.values():
-        if r["type"] == "review" and r["status"] == "open" and r["task"] == task["slug"] \
-                and s.proofs[r["proof"]]["req"] == req_id:
-            r["status"] = "superseded"
-
-
-# --- views (state + observations)
-
-def req_status(s, task, req, subject):
-    """missing | proved | accepted | rejected | stale | waived, plus the current proof seq."""
-    if req["waived"]:
-        return "waived", None
-    p = s.proofs.get(req["proof"])
-    if not p or p["req_rev"] != req["rev"]:
-        return "missing", None
-    if p["verdict"] == "reject":
-        return "rejected", p["seq"]
-    if subject is not None and not fresh(p["subject"], subject, req["kind"]):
-        return "stale", p["seq"]
-    return ("accepted" if p["verdict"] == "accept" else "proved"), p["seq"]
-
-
-def fresh(proved, current, kind):
-    if kind == "tree":
-        return proved["tree"] == current["tree"]
-    if kind == "commit":
-        return proved["commit"] == current["commit"]
-    return proved["commit"] == current["commit"] and proved["base"] == current["base"]
-
-
-def health(alive, session):
-    """present | absent | unknown for a bound session, given alive(session) -> True/False/None."""
-    if not session:
-        return None
-    state = alive(session)
-    return "unknown" if state is None else ("present" if state else "absent")
-
-
-def progress(s, task, subject):
-    if task["status"] != "open":
-        return task["status"]
-    lead = task["assign"].get("lead")
-    if not lead:
-        return "unassigned"
-    if not lead["session"]:
-        return "assigned"
-    states = [req_status(s, task, r, subject)[0] for r in task["reqs"].values()]
-    if any(x in ("missing", "rejected", "stale") for x in states):
-        return "working"
-    if any(x == "proved" for x in states):
-        return "validating"
-    if any(r["type"] == "decide" and r["merge"] and r["status"] == "open" for r in task_requests(s, task)):
-        return "awaiting-merge"
-    return "ready"
-
-
-def task_requests(s, task):
-    return [r for r in s.requests.values() if r["task"] == task["slug"]]
-
-
-def blockers(s, task):
-    return [r["seq"] for r in task_requests(s, task) if r["status"] == "open" and r["blocking"]
-            and r["type"] in ("ask", "decide")]
-
-
-def recipient(s, r):
-    """The actor a request waits on now: driver, human, or the current holder of a task role."""
-    if r["to"] in ("driver", "human"):
-        return r["to"]
-    task = s.tasks.get(r["task"])
-    return task and s.holder(task, r["to"])
-
-
-def asker(s, r):
-    if r.get("from_role") in ROLES and r["task"] in s.tasks:
-        return s.holder(s.tasks[r["task"]], r["from_role"])
-    return r["from"]
-
-
-def inbox(s, actor):
-    return [r for r in s.requests.values() if r["status"] == "open" and recipient(s, r) == actor]
+        _set(s, e, {"state": "done" if k == "close" else "dropped"})
+    elif k in ("ask", "propose", "decide"):
+        to = e.get("to") or {"propose": "driver", "decide": "human"}[k]
+        if t and to == "lead":
+            to = t["lead"]
+        elif t and to in t["fields"] and to not in ("driver", "human"):
+            to = t["fields"][to]
+        notes = e.get("option_notes") or {}
+        options = [f"{o}: {notes[o]}" if notes.get(o) else o for o in e.get("options") or []]
+        _ask(s, e, to, e.get("text") or e.get("question"), options)
+        if k == "decide" and e.get("from"):
+            _answer(s, e, e["from"], f"forwarded as #{e['seq']}")
+    elif k == "answer":
+        _answer(s, e, e["request"], e["text"])
+    elif k == "decision":
+        _answer(s, e, e["request"], f"{e['option']}: {e.get('why') or ''}".rstrip(": "))
+    elif k in ("cancel", "decline"):
+        word = "cancelled" if k == "cancel" else "declined"
+        _answer(s, e, e["request"], word + (f": {e['why']}" if e.get("why") else ""))

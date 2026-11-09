@@ -1,10 +1,8 @@
 """Append-only JSONL log with one lock file, fsync, and torn-tail repair."""
 import contextlib
 import fcntl
-import hashlib
 import json
 import os
-import shutil
 import time
 from pathlib import Path
 
@@ -17,17 +15,6 @@ class Store:
     def __init__(self, root):
         self.root = Path(root)
         self.log = self.root / "events.jsonl"
-        self.evidence = self.root / "evidence"
-        self.briefs = self.root / "briefs"
-
-    def exists(self):
-        return self.log.exists()
-
-    def create(self):
-        for d in (self.root, self.evidence, self.briefs):
-            d.mkdir(parents=True, exist_ok=True)
-        self.log.touch()
-        _fsync_dir(self.root)
 
     @contextlib.contextmanager
     def lock(self):
@@ -43,8 +30,7 @@ class Store:
         """(events, torn_tail_bytes). Raises Corrupt on a bad interior line or a sequence gap."""
         if not self.log.exists():
             return [], 0
-        raw = self.log.read_bytes()
-        lines = raw.split(b"\n")
+        lines = self.log.read_bytes().split(b"\n")
         tail = lines.pop()  # bytes after the last newline; empty when the file ends cleanly
         events = []
         for n, line in enumerate(lines, 1):
@@ -70,24 +56,3 @@ class Store:
             fh.flush()
             os.fsync(fh.fileno())
         return event
-
-    def keep(self, path):
-        """Copy a file into content-addressed evidence; return its record."""
-        data = Path(path).read_bytes()
-        digest = hashlib.sha256(data).hexdigest()
-        dest = self.evidence / (digest + Path(path).suffix)
-        if not dest.exists():
-            tmp = dest.with_suffix(dest.suffix + ".tmp")
-            shutil.copyfile(path, tmp)
-            with open(tmp, "rb") as fh:
-                os.fsync(fh.fileno())
-            os.replace(tmp, dest)
-        return {"name": Path(path).name, "sha256": digest, "path": str(dest)}
-
-
-def _fsync_dir(d):
-    fd = os.open(d, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)

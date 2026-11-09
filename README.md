@@ -1,46 +1,25 @@
 # ledger
 
-A per-repo state machine for a driver agent (chief of staff) and its long-lived leads. Agents append events; the CLI checks each event's guard under a lock and computes every view from the log plus a git snapshot. It needs only git and Python 3.11+: no terminal multiplexer, launcher, or message bus.
+A per-repo record of work for a driver agent (chief of staff) and its leads: tasks, who leads them, their state, messages, and one inbox. It records facts and never acts: no launching, waking, or verifying agents. It needs only git and Python 3.11+.
 
-- Store: append-only `events.jsonl` under `git rev-parse --git-common-dir`/ledger.
-- Identity: the caller's agent process (`claude` or `codex`, by pid and start time), so it survives context compaction and `/clear`. `LEDGER_SESSION` overrides it.
-- Lifecycle: `open` → `closed` | `dropped`. Progress, blockers, and agent health are computed.
-- Proofs run on a clean, committed worktree; the driver accepts or rejects each one by ID.
-- Inbox: open requests (asks, proofs to review, ideas, human decisions). `ledger next` returns one action; `ledger next --wait` blocks until there is one.
-
-```sh
-ledger init [--launch <cmd>] [--ring <cmd>] [--whoami <cmd>]  # driver
-ledger new <slug> "<title>" --req "tests:lead:tree:tests pass" [--merge]
-ledger assign <slug> <lead> --branch <b> --cwd <worktree>  # writes a brief with a one-time token
-ledger start <slug> --token <token>                         # lead, from its brief
-ledger prove <slug> tests -- python3 -m unittest
-ledger next --wait                                          # anyone: the one next action
-ledger inbox --human                                        # the human decision queue
-ledger decision <id> <option> --human --why "<reason>"
-```
-
-## Hosts
-
-The ledger contains no host-specific code. Three optional commands, set once with `ledger init`, adapt it to a host:
-
-- `--launch`: starts an agent for an assignment. Fields: `{name} {role} {task} {cwd} {brief} {log}`. Without it, `assign` tells the driver where the brief is.
-- `--ring`: wakes an agent. Fields: `{address} {text}`.
-- `--whoami`: prints the caller's address for `--ring`. It runs on `start`, `init`, and each session start.
-
-Without `--ring`, agents wait with `ledger next --wait`. Examples:
+- Store: append-only `events.jsonl` under `git rev-parse --git-common-dir`/ledger, written under a lock.
+- Names: `--as <name>` or `LEDGER_AS`; the default is `driver`. Nothing checks them.
+- States: `todo → active → review → done`, plus `blocked` and `dropped`. `ledger set` refuses other moves.
+- Inbox: `ask` opens an item for a name (`driver` by default, `human` for you); `answer` closes it. Ending a task closes its items.
 
 ```sh
-# Headless Claude Code agents, no wake-ups
-ledger init --launch 'claude -p --model haiku --dangerously-skip-permissions "$(cat {brief})" > {log} 2>&1'
-
-# rex-agents panes, woken through Reason
-ledger init \
-  --launch 'rex-agents launch --tab --name {name} --cwd {cwd} --model claude-opus-5-5 --effort medium --task-file {brief}' \
-  --ring 'reason-network send {address} {text}' \
-  --whoami 'reason-network who --json | python3 -c "import json,sys; print(next(s[\"address\"] for s in json.load(sys.stdin)[\"sessions\"] if s[\"is_me\"]))"'
+ledger new login "Fix login" --lead ana             # driver
+ledger set login state=active branch=fix-login      # any field; key= clears it
+ledger say login "root cause: stale cookie"         # message on the task
+ledger ask login "Postgres or SQLite?" --wait       # blocks until answered (100s default)
+ledger ask - "Merge login?" --to human --option "merge: ship it" --option hold
+ledger answer 4 "merge"                             # --as human
+ledger inbox [--for human | --all] [--wait]
+ledger board [--all]
+ledger show login | ledger show 4
 ```
 
-A ledger started by 0.1 identified agents by Rex pane. After upgrading, the driver takes it over once with `ledger rebind --human --why "<reason>"`.
+Add `--json` to any command for machine output. Logs from 0.1 and 0.2 still load: tasks, leads, states, and requests carry over; proofs are dropped.
 
 ## Install
 
@@ -50,9 +29,9 @@ Needs Python 3.11 or newer.
 curl -fsSL https://github.com/0xjgv/ledger/releases/latest/download/install.sh | sh
 ```
 
-It verifies the release archive's SHA-256, unpacks it under `~/.local/share/ledger`, and links `~/.local/bin/ledger`. Pin a version with `LEDGER_VERSION=v0.1.0`.
+It verifies the release archive's SHA-256, unpacks it under `~/.local/share/ledger`, and links `~/.local/bin/ledger`. Pin a version with `LEDGER_VERSION=v0.3.0`.
 
-Update in place: `ledger update` (or `ledger update v0.2.0`). It checks the release's `install.sh` against `checksums.txt`, then runs it.
+Update in place: `ledger update` (or `ledger update v0.3.0`). It checks the release's `install.sh` against `checksums.txt`, then runs it.
 
 ## Develop
 
