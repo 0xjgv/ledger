@@ -21,11 +21,10 @@ ledger decision <id> <option> --human --why "<reason>"
 
 ## Install
 
-Needs Python 3.11 or newer. Download `install.sh` from the latest release and run it:
+Needs Python 3.11 or newer.
 
 ```sh
-curl -fsSLO https://github.com/0xjgv/ledger/releases/latest/download/install.sh
-sh install.sh
+curl -fsSL https://github.com/0xjgv/ledger/releases/latest/download/install.sh | sh
 ```
 
 It verifies the release archive's SHA-256, unpacks it under `~/.local/share/ledger`, and links `~/.local/bin/ledger`. Pin a version with `LEDGER_VERSION=v0.1.0`.

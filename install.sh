@@ -1,6 +1,6 @@
 #!/bin/sh
 # Install or update ledger from a checksummed GitHub release.
-# Fetch this script from https://github.com/0xjgv/ledger/releases/latest/download/install.sh and run it with sh.
+#   curl -fsSL https://github.com/0xjgv/ledger/releases/latest/download/install.sh | sh
 # LEDGER_VERSION        release version, e.g. v0.1.0 (default: latest)
 # LEDGER_DOWNLOAD_BASE  release base URL, or a directory holding the assets (testing)
 # LEDGER_HOME           where versions are unpacked (default: $HOME/.local/share/ledger)
