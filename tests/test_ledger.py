@@ -76,6 +76,15 @@ class Ledger(unittest.TestCase):
         self.assertEqual(self.json("inbox"), [])
         self.assertIn("inbox empty for driver", self.run_l("inbox").stdout)
 
+    def test_answers_return_to_the_asker_once(self):
+        self.run_l("new", "x", "X")
+        self.run_l("ask", "x", "merge?", "--to", "human")
+        self.run_l("answer", "2", "yes", who="human")
+        r = self.run_l("inbox", "--wait", "--timeout", "0")
+        self.assertIn("answered by human: yes", r.stdout)
+        self.assertEqual(self.json("inbox"), [])
+        self.assertEqual(self.json("inbox", "--all"), [])
+
     def test_ending_a_task_closes_its_items(self):
         self.run_l("new", "x", "X")
         self.run_l("ask", "x", "q?", "--to", "human")

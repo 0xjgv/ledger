@@ -67,6 +67,13 @@ def wait_for(store, done, timeout):
         time.sleep(2)
 
 
+def mark_seen(store, actor, items):
+    """Record that actor has read the answers to its own asks among items."""
+    ns = [i["n"] for i in items if i["status"] == "answered" and i["from"] == actor and not i["seen"]]
+    if ns:
+        write(store, actor, lambda s: {"kind": "seen", "items": ns})
+
+
 # --- commands: each returns (data, text)
 
 def cmd_new(store, a):
@@ -120,6 +127,7 @@ def cmd_ask(store, a):
     if not a.wait:
         return e, f"#{e['seq']} asked {a.to}"
     item = wait_for(store, lambda s: s.items[e["seq"]]["status"] != "open", a.timeout).items[e["seq"]]
+    mark_seen(store, a.actor, [item])
     return item, render_item(item)
 
 
@@ -136,6 +144,8 @@ def cmd_inbox(store, a):
     name = None if a.all else (a.name or a.actor)
     s = wait_for(store, lambda s: s.inbox(name), a.timeout if a.wait else 0)
     items = s.inbox(name)
+    if name == a.actor:
+        mark_seen(store, a.actor, items)
     if not items:
         return [], f"inbox empty{'' if name is None else ' for ' + name}"
     return items, "\n".join(render_item(i) for i in items)
@@ -240,7 +250,8 @@ def parser():
     add("ask", cmd_ask, "open an inbox item on a task (or - for none)", A("task"), A("text"),
         A("--to", default="driver"), A("--option", action="append", default=[], help='"id: description"'), *wait)
     add("answer", cmd_answer, "answer and close an inbox item", A("item", type=lambda v: int(v.lstrip("#"))), A("text"))
-    add("inbox", cmd_inbox, "open items for you", A("--for", dest="name"), A("--all", action="store_true"), *wait)
+    add("inbox", cmd_inbox, "open items for you, and new answers to your asks", A("--for", dest="name"),
+        A("--all", action="store_true"), *wait)
     add("board", cmd_board, "tasks and inbox counts", A("--all", action="store_true", help="include done and dropped"))
     add("show", cmd_show, "a task's history, or one item (#n)", A("ref"))
     add("version", cmd_version, "print the version")

@@ -5,7 +5,7 @@ A per-repo record of work for a driver agent (chief of staff) and its leads: tas
 - Store: append-only `events.jsonl` under `git rev-parse --git-common-dir`/ledger, written under a lock.
 - Names: `--as <name>` or `LEDGER_AS`; the default is `driver`. Nothing checks them.
 - States: `todo → active → review → done`, plus `blocked` and `dropped`. `ledger set` refuses other moves.
-- Inbox: `ask` opens an item for a name (`driver` by default, `human` for you); `answer` closes it. Ending a task closes its items.
+- Inbox: `ask` opens an item for a name (`driver` by default, `human` for you); `answer` closes it, and the answer shows once in the asker's inbox. Ending a task closes its items.
 
 ```sh
 ledger new login "Fix login" --lead ana             # driver

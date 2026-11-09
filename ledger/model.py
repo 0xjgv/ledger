@@ -19,7 +19,9 @@ class State:
         self.history = {}  # task id -> events
 
     def inbox(self, name=None):
-        return [i for i in self.items.values() if i["status"] == "open" and (name is None or i["to"] == name)]
+        """Open items for name (all open items when None), plus answers to name's asks not yet seen."""
+        return [i for i in self.items.values() if (i["status"] == "open" and name in (None, i["to"]))
+                or (name and i["status"] == "answered" and i["from"] == name and not i["seen"])]
 
 
 def fold(events):
@@ -45,6 +47,9 @@ def _apply(s, e):
         _ask(s, e, e["to"], e["text"], e.get("options", []))
     elif k == "answer":
         _answer(s, e, e["item"], e["text"])
+    elif k == "seen":
+        for n in e["items"]:
+            s.items[n]["seen"] = True
 
 
 def _new(s, e, lead):
@@ -69,13 +74,15 @@ def _set(s, e, fields):
 
 def _ask(s, e, to, text, options):
     s.items[e["seq"]] = {"n": e["seq"], "task": e.get("task"), "from": e.get("actor"), "to": to, "text": text,
-                         "options": options, "at": e["at"], "status": "open", "answer": None, "by": None}
+                         "options": options, "at": e["at"], "status": "open", "answer": None, "by": None,
+                         "seen": False}
 
 
-def _answer(s, e, n, text):
+def _answer(s, e, n, text, seen=False):
     item = s.items.get(n)
     if item and item["status"] == "open":
-        item.update(status="answered", answer=text, by=e.get("actor"), answered=e["at"])
+        item.update(status="answered", answer=text, by=e.get("actor"), answered=e["at"],
+                    seen=seen or e.get("actor") == item["from"])
 
 
 def _apply_v2(s, e):
@@ -99,11 +106,11 @@ def _apply_v2(s, e):
         options = [f"{o}: {notes[o]}" if notes.get(o) else o for o in e.get("options") or []]
         _ask(s, e, to, e.get("text") or e.get("question"), options)
         if k == "decide" and e.get("from"):
-            _answer(s, e, e["from"], f"forwarded as #{e['seq']}")
+            _answer(s, e, e["from"], f"forwarded as #{e['seq']}", seen=True)
     elif k == "answer":
-        _answer(s, e, e["request"], e["text"])
+        _answer(s, e, e["request"], e["text"], seen=True)
     elif k == "decision":
-        _answer(s, e, e["request"], f"{e['option']}: {e.get('why') or ''}".rstrip(": "))
+        _answer(s, e, e["request"], f"{e['option']}: {e.get('why') or ''}".rstrip(": "), seen=True)
     elif k in ("cancel", "decline"):
         word = "cancelled" if k == "cancel" else "declined"
-        _answer(s, e, e["request"], word + (f": {e['why']}" if e.get("why") else ""))
+        _answer(s, e, e["request"], word + (f": {e['why']}" if e.get("why") else ""), seen=True)
