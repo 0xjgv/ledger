@@ -19,4 +19,23 @@ ledger inbox --human             # the human decision queue
 ledger decision <id> <option> --human --why "<reason>"
 ```
 
-Install: symlink `bin/ledger` onto PATH. Tests: `python3.13 -m unittest discover -s tests`.
+## Install
+
+Needs Python 3.11 or newer. Download `install.sh` from the latest release and run it:
+
+```sh
+curl -fsSLO https://github.com/0xjgv/ledger/releases/latest/download/install.sh
+sh install.sh
+```
+
+It verifies the release archive's SHA-256, unpacks it under `~/.local/share/ledger`, and links `~/.local/bin/ledger`. Pin a version with `LEDGER_VERSION=v0.1.0`.
+
+Update in place: `ledger update` (or `ledger update v0.2.0`). It checks the release's `install.sh` against `checksums.txt`, then runs it.
+
+## Develop
+
+```sh
+make test               # unit and installer tests
+make package            # dist/: archive, install.sh, checksums.txt
+make release BUMP=minor # bump, commit, tag, push; CI publishes the release
+```

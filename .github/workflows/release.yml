@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Check the tag is on main and matches the version
+        run: |
+          git merge-base --is-ancestor HEAD origin/main
+          version=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' ledger/__init__.py)
+          test "$GITHUB_REF_NAME" = "v$version"
+
+      - name: Test
+        run: |
+          git config --global user.name ci && git config --global user.email ci@example.com
+          python -m unittest discover -s tests
+
+      - name: Package
+        run: sh scripts/package.sh dist
+
+      - name: Smoke-test the installer
+        run: |
+          LEDGER_DOWNLOAD_BASE="$PWD/dist" LEDGER_HOME="$RUNNER_TEMP/home" LEDGER_BIN_DIR="$RUNNER_TEMP/bin" sh dist/install.sh
+          test "$("$RUNNER_TEMP/bin/ledger" version)" = "${GITHUB_REF_NAME#v}"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/ledger-*.tar.gz dist/install.sh dist/checksums.txt --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/ledger-*.tar.gz dist/install.sh dist/checksums.txt \
+              --verify-tag --title "ledger $GITHUB_REF_NAME" --generate-notes
+          fi

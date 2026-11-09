@@ -5,10 +5,11 @@ import sys
 from pathlib import Path
 
 if sys.version_info < (3, 11):
-    python = shutil.which("python3.13")
-    if not python or Path(python).resolve() == Path(sys.executable).resolve():
-        sys.exit("ledger needs Python 3.11 or newer")
-    os.execv(python, [python, __file__, *sys.argv[1:]])
+    for name in ("python3.13", "python3.12", "python3.11"):
+        python = shutil.which(name)
+        if python and Path(python).resolve() != Path(sys.executable).resolve():
+            os.execv(python, [python, __file__, *sys.argv[1:]])
+    sys.exit("ledger needs Python 3.11 or newer")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from ledger.cli import main

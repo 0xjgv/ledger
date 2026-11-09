@@ -864,6 +864,17 @@ def main(argv=None, world=None):
     world = world or World()
     if argv[:2] == ["_hook", "session-start"]:
         return hook_session_start(world)
+    if argv == ["version"]:
+        from . import __version__
+        print(__version__)
+        return 0
+    if argv[:1] == ["update"]:
+        from .update import update
+        need_version = argv[1:]
+        if need_version and (len(need_version) != 1 or not re.fullmatch(r"v?\d+\.\d+\.\d+", need_version[0])):
+            print("usage: ledger update [vX.Y.Z]", file=sys.stderr)
+            return 2
+        return update(need_version[0] if need_version else None)
     cmd = []
     if "--" in argv:
         i = argv.index("--")
