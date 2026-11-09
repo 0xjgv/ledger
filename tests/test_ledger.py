@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import re
 import os
 import subprocess
 import sys
@@ -22,21 +23,25 @@ def git(cwd, *args):
 
 
 class Fake(World):
-    def __init__(self, bed, cwd, block, address):
+    def __init__(self, bed, cwd, session, address):
         super().__init__(cwd=str(cwd), env={})
-        self.bed, self._block, self.address = bed, block, address
+        self.bed, self._session, self.address = bed, session, address
 
-    def block(self):
-        return self._block
+    def sessions(self):
+        return [self._session] if self._session else []
 
-    def panes(self):
-        return None if self.bed.rex_down else dict(self.bed.panes)
+    def alive(self, session):
+        return self.bed.alive.get(session)
 
     def reason_address(self):
         return self.address
 
     def ring(self, to, text, fyi=False, notify=False):
         self.bed.rings.append((to, text, fyi, notify))
+
+    def spawn(self, command, log_path, status_path):
+        self.bed.spawned.append(command)
+        return 4242
 
 
 class Bed(unittest.TestCase):
@@ -50,21 +55,32 @@ class Bed(unittest.TestCase):
         git(self.repo, "commit", "-qm", "init")
         self.wt = self.tmp / "wt"
         git(self.repo, "worktree", "add", "-q", "-b", "feat", str(self.wt))
-        self.panes = {"b-driver": None, "b-lead": "rex-agents:o:lead-a", "b-rev": "rex-agents:o:rev-a"}
-        self.rex_down = False
-        self.rings = []
+        self.alive = {"s-driver": True, "s-lead": True, "s-rev": True}
+        self.rings, self.spawned, self.tokens = [], [], {}
 
     def run_as(self, who, *argv, cwd=None, expect=0):
-        block, addr, default = {"driver": ("b-driver", "me/driver", self.repo),
-                                "lead": ("b-lead", "me/lead", self.wt),
-                                "rev": ("b-rev", "me/rev", self.wt),
-                                "human": (None, None, self.repo)}[who] if isinstance(who, str) else who
+        session, addr, default = {"driver": ("s-driver", "me/driver", self.repo),
+                                  "lead": ("s-lead", "me/lead", self.wt),
+                                  "rev": ("s-rev", "me/rev", self.wt),
+                                  "human": (None, None, self.repo)}[who] if isinstance(who, str) else who
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            code = main(list(argv), Fake(self, cwd or default, block, addr))
+            code = main(list(argv), Fake(self, cwd or default, session, addr))
         data = json.loads(out.getvalue()) if out.getvalue().strip() else {}
         self.assertEqual(code, expect, data)
         return data
+
+    def init(self):
+        return self.run_as("driver", "init", "--doorbell", "reason")
+
+    def assign(self, task, name, *extra):
+        e = self.run_as("driver", "assign", task, name, *extra)["event"]
+        token = re.search(r"--token (\w+)", Path(e["brief"]).read_text()).group(1)
+        self.tokens[(task, name)] = token
+        return token
+
+    def start(self, who, task, name, expect=0):
+        return self.run_as(who, "start", task, "--token", self.tokens[(task, name)], expect=expect)
 
     def commit(self, name="b.txt", text="b\n", msg="work"):
         (self.wt / name).write_text(text)
@@ -72,12 +88,16 @@ class Bed(unittest.TestCase):
         git(self.wt, "commit", "-qm", msg)
 
     def setup_task(self, merge=True):
-        self.run_as("driver", "init")
+        self.init()
         argv = ["new", "t1", "Fix it", "--req", "tests:lead:tree:tests pass", "--req", "review:reviewer:diff:review PASS"]
         self.run_as("driver", *argv + (["--merge"] if merge else []))
-        self.run_as("driver", "assign", "t1", "lead-a", "--branch", "feat", "--cwd", str(self.wt))
-        self.run_as("lead", "start", "t1")
+        self.assign("t1", "lead-a", "--branch", "feat", "--cwd", str(self.wt))
+        self.start("lead", "t1", "lead-a")
         self.commit()
+
+    def add_reviewer(self):
+        self.assign("t1", "rev-a", "--role", "reviewer")
+        self.start("rev", "t1", "rev-a")
 
     def prove_tests(self):
         return self.run_as("lead", "prove", "t1", "tests", "--", "true")["event"]["seq"]
@@ -90,8 +110,7 @@ class HappyPath(Bed):
         self.assertEqual(self.run_as("driver", "next")["action"], "validate")
         self.run_as("driver", "accept", str(p1))
         self.assertEqual(self.run_as("driver", "next")["action"], "assign")
-        self.run_as("driver", "assign", "t1", "rev-a", "--role", "reviewer")
-        self.run_as("rev", "start", "t1")
+        self.add_reviewer()
         review = self.tmp / "review.md"
         review.write_text("---\nverdict: PASS\n---\nok\n")
         p2 = self.run_as("rev", "prove", "t1", "review", "--file", str(review))["event"]["seq"]
@@ -106,7 +125,8 @@ class HappyPath(Bed):
         show = self.run_as("driver", "show", "t1")
         self.run_as("driver", "close", "t1", "--candidate", show["candidate"], "--rev", str(show["rev"]))
         self.assertEqual(self.run_as("driver", "show", "t1")["status"], "closed")
-        self.assertEqual(self.run_as("driver", "next")["action"], "idle")
+        self.assertEqual(self.run_as("driver", "next")["action"], "done")
+        self.assertEqual(self.run_as("lead", "next")["action"], "done")
 
     def test_lead_next_and_doorbell(self):
         self.setup_task()
@@ -126,8 +146,7 @@ class Wakeups(Bed):
 
     def test_accept_wakes_prover_and_reviewer_when_lead_work_done(self):
         self.setup_task()
-        self.run_as("driver", "assign", "t1", "rev-a", "--role", "reviewer")
-        self.run_as("rev", "start", "t1")
+        self.add_reviewer()
         self.assertEqual(self.run_as("rev", "next")["action"], "idle")
         p = self.prove_tests()
         self.rings.clear()
@@ -177,8 +196,7 @@ class Proofs(Bed):
 
     def test_review_file_without_pass_fails(self):
         self.setup_task()
-        self.run_as("driver", "assign", "t1", "rev-a", "--role", "reviewer")
-        self.run_as("rev", "start", "t1")
+        self.add_reviewer()
         review = self.tmp / "review.md"
         review.write_text("---\nverdict: FAIL\n---\n")
         self.assertFalse(self.run_as("rev", "prove", "t1", "review", "--file", str(review))["event"]["passed"])
@@ -225,57 +243,85 @@ class Close(Bed):
 
 class Identity(Bed):
     def test_only_driver_creates_tasks(self):
-        self.run_as("driver", "init")
+        self.init()
         self.assertEqual(self.run_as("lead", "new", "t2", "x", "--req", "a:lead:tree:x", expect=2)["code"], "not_driver")
 
-    def test_driver_takeover_only_when_old_pane_absent(self):
-        self.run_as("driver", "init")
-        newpane = ("b-new", "me/driver2", self.repo)
-        self.panes["b-new"] = None
-        self.assertEqual(self.run_as(newpane, "init", expect=2)["code"], "driver_alive")
-        self.rex_down = True
-        self.assertEqual(self.run_as(newpane, "init", expect=2)["code"], "driver_alive")
-        self.rex_down = False
-        del self.panes["b-driver"]
-        self.run_as(newpane, "init")
-        self.run_as(newpane, "new", "t2", "x", "--req", "a:lead:tree:x")
+    def test_no_identity_refused(self):
+        self.assertEqual(self.run_as((None, None, self.repo), "init", expect=2)["code"], "no_identity")
 
-    def test_worker_cannot_take_over_driver(self):
-        self.run_as("driver", "init")
-        del self.panes["b-driver"]
-        self.assertEqual(self.run_as("lead", "init", expect=2)["code"], "worker_pane")
+    def test_driver_takeover_only_when_old_session_absent(self):
+        self.init()
+        new = ("s-new", "me/driver2", self.repo)
+        self.alive["s-new"] = True
+        self.assertEqual(self.run_as(new, "init", expect=2)["code"], "driver_alive")
+        del self.alive["s-driver"]  # unknown liveness is not absence
+        self.assertEqual(self.run_as(new, "init", expect=2)["code"], "driver_alive")
+        self.alive["s-driver"] = False
+        self.run_as(new, "init")
+        self.run_as(new, "new", "t2", "x", "--req", "a:lead:tree:x")
+
+    def test_assignee_cannot_take_over_driver(self):
+        self.setup_task()
+        self.alive["s-driver"] = False
+        self.assertEqual(self.run_as("lead", "init", expect=2)["code"], "worker")
 
     def test_human_rebind(self):
-        self.run_as("driver", "init")
-        self.panes["b-new"] = None
-        self.run_as(("b-new", "me/d2", self.repo), "rebind", "--human", "--why", "restart")
+        self.init()
+        self.run_as(("s-new", "me/d2", self.repo), "rebind", "--human", "--why", "restart")
         self.assertEqual(self.run_as("driver", "new", "t2", "x", "--req", "a:lead:tree:x", expect=2)["code"], "not_driver")
 
-    def test_start_requires_matching_label_and_absent_old_pane(self):
+    def test_start_needs_token_and_absent_old_session(self):
         self.setup_task()
-        self.assertEqual(self.run_as("rev", "start", "t1", expect=2)["code"], "not_assigned")
-        self.panes["b-lead2"] = "rex-agents:o:lead-a"
-        relaunched = ("b-lead2", "me/lead2", self.wt)
-        self.assertEqual(self.run_as(relaunched, "start", "t1", expect=2)["code"], "bound_elsewhere")
-        del self.panes["b-lead"]
-        self.run_as(relaunched, "start", "t1")
+        self.assertEqual(self.run_as("rev", "start", "t1", "--token", "nope", expect=2)["code"], "bad_token")
+        relaunched = ("s-lead2", "me/lead2", self.wt)
+        self.assertEqual(self.start(relaunched, "t1", "lead-a", expect=2)["code"], "bound_elsewhere")
+        self.alive["s-lead"] = False
+        self.start(relaunched, "t1", "lead-a")
         self.assertEqual(self.run_as(relaunched, "next")["action"], "prove")
+
+    def test_unbound_next_refused(self):
+        self.init()
+        self.assertEqual(self.run_as("lead", "next", expect=2)["code"], "unbound")
+
+
+class Launch(Bed):
+    def test_launch_template_runs_on_assign_and_failed_launch_asks_for_relaunch(self):
+        self.run_as("driver", "init", "--launch", "agent --name {name} --cwd {cwd} --brief {brief}")
+        self.run_as("driver", "new", "t1", "x", "--req", "tests:lead:tree:x")
+        out = self.run_as("driver", "assign", "t1", "lead-a", "--branch", "feat", "--cwd", str(self.wt))
+        self.assertTrue(self.spawned[0].startswith("agent --name lead-a --cwd "))
+        self.assertEqual(out["launch"]["pid"], 4242)
+        self.assertEqual(self.run_as("driver", "next")["action"], "idle")
+        status = self.repo / f".git/ledger/launch/{out['event']['seq']}.status"
+        status.write_text("1\n")
+        self.assertEqual(self.run_as("driver", "next")["action"], "relaunch")
+
+    def test_dead_lead_asks_for_relaunch(self):
+        self.setup_task()
+        self.alive["s-lead"] = False
+        self.assertEqual(self.run_as("driver", "next")["action"], "relaunch")
+
+    def test_without_doorbell_nothing_rings(self):
+        self.run_as("driver", "init")
+        self.run_as("driver", "new", "t1", "x", "--req", "tests:lead:tree:x")
+        self.assign("t1", "lead-a", "--branch", "feat", "--cwd", str(self.wt))
+        self.start("lead", "t1", "lead-a")
+        self.assertEqual(self.rings, [])
 
 
 class Requests(Bed):
     def test_ask_moves_to_new_lead_and_old_lead_stops(self):
         self.setup_task()
         ask = self.run_as("driver", "ask", "t1", "Status?")["event"]["seq"]
-        self.panes["b-lead2"] = "rex-agents:o:lead-b"
-        self.run_as("driver", "assign", "t1", "lead-b", "--branch", "feat", "--cwd", str(self.wt))
+        self.assign("t1", "lead-b", "--branch", "feat", "--cwd", str(self.wt))
         self.assertEqual(self.run_as("lead", "next")["action"], "stop")
-        lead_b = ("b-lead2", "me/leadb", self.wt)
-        self.run_as(lead_b, "start", "t1")
+        lead_b = ("s-lead2", "me/leadb", self.wt)
+        self.start(lead_b, "t1", "lead-b")
         self.assertEqual(self.run_as(lead_b, "next")["request"], ask)
         self.run_as(lead_b, "answer", str(ask), "fine")
 
     def test_decision_conflict_refused_and_repeat_harmless(self):
-        self.run_as("driver", "init")
+        self.init()
         d = self.run_as("driver", "decide", "Ship?", "--option", "yes", "--option", "no")["event"]["seq"]
         self.assertEqual(self.run_as("human", "decision", str(d), "yes", expect=2)["code"], "human_only")
         self.run_as("human", "decision", str(d), "yes", "--human", "--why", "ok")
@@ -308,17 +354,6 @@ class Requests(Bed):
         self.assertEqual(e["task"], "t1")
         self.assertEqual(self.run_as("driver", "inbox")["requests"], [])
 
-    def test_codex_lead_refused_at_start(self):
-        self.run_as("driver", "init")
-        self.run_as("driver", "new", "t2", "x", "--req", "a:lead:tree:x")
-        self.run_as("driver", "assign", "t2", "lead-a", "--branch", "feat", "--cwd", str(self.wt))
-        world = Fake(self, self.wt, "b-lead", "me/lead")
-        world.env = {"CODEX_THREAD_ID": "abc"}
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            self.assertEqual(main(["start", "t2"], world), 2)
-        self.assertEqual(json.loads(out.getvalue())["code"], "unsupported_harness")
-
     def test_request_id_retry(self):
         self.setup_task()
         a = self.run_as("lead", "--request-id", "r1", "ask", "t1", "Port?")["event"]["seq"]
@@ -342,14 +377,22 @@ class Store(Bed):
         log.write_text(log.read_text().replace("{", "{x", 1))
         self.assertEqual(self.run_as("driver", "board", expect=2)["code"], "corrupt_log")
 
+    def test_ledger_from_0_1_keeps_its_rex_identity_and_doorbell(self):
+        log = self.repo / ".git/ledger/events.jsonl"
+        log.parent.mkdir(parents=True)
+        log.write_text(json.dumps({"seq": 1, "kind": "init", "actor": "driver", "block": "blk-1", "reason": "me/d"}) + "\n")
+        self.alive["blk-1"] = True
+        self.run_as(("blk-1", "me/d", self.repo), "new", "t2", "x", "--req", "a:lead:tree:x")
+        self.assertEqual(self.run_as(("blk-1", "me/d", self.repo), "next")["action"], "assign")
+
     def test_hook_injects_next_action(self):
         self.setup_task()
         out = io.StringIO()
-        world = Fake(self, self.wt, "b-lead", "me/lead-new")
+        world = Fake(self, self.wt, "s-lead", "me/lead-new")
         with contextlib.redirect_stdout(out), unittest.mock.patch("sys.stdin", io.StringIO(json.dumps({"cwd": str(self.wt)}))):
             main(["_hook", "session-start"], world)
         ctx = json.loads(out.getvalue())["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("ledger next", ctx)
+        self.assertIn("ledger next --wait", ctx)
         self.assertIn('"action": "prove"', ctx)
         self.assertEqual(self.run_as("driver", "log")["events"][-1]["kind"], "hello")
 

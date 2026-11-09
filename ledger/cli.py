@@ -1,7 +1,11 @@
 """ledger: a per-repo state machine for a driver and its long-lived leads."""
 import argparse
+import shlex
 import json
+import hashlib
 import re
+import secrets
+import time
 import uuid
 import sys
 from pathlib import Path
@@ -9,7 +13,7 @@ from pathlib import Path
 from . import model
 from .model import ROLES, KINDS, PRIORITIES
 from .store import Store, Corrupt
-from .world import World, label_name
+from .world import World
 
 SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 VERDICT = re.compile(r"^---\s*\n(?:.*\n)*?verdict:\s*(\S+)\s*\n(?:.*\n)*?---", re.M)
@@ -31,7 +35,21 @@ class Ctx:
             raise Refuse("no_repo", "Not inside a git repository.")
         self.store = Store(common / "ledger")
         self.repo = common.parent
-        self._panes = False
+        self._alive = {}
+
+    @property
+    def config(self):
+        try:
+            return json.loads((self.store.root / "config.json").read_text())
+        except (OSError, ValueError):
+            pass
+        # Ledgers started by 0.1 ran on Rex and rang Reason; keep them ringing.
+        try:
+            with open(self.store.log) as fh:
+                first = json.loads(fh.readline() or "{}")
+        except (OSError, ValueError):
+            first = {}
+        return {"doorbell": "reason"} if "block" in first else {}
 
     def load(self):
         try:
@@ -41,21 +59,29 @@ class Ctx:
         self.state = model.fold(events)
         return self.state
 
-    def panes(self):
-        if self._panes is False:
-            self._panes = self.world.panes()
-        return self._panes
+    def alive(self, session):
+        if session not in self._alive:
+            self._alive[session] = self.world.alive(session)
+        return self._alive[session]
+
+    def health(self, session):
+        return model.health(self.alive, session)
+
+    def session(self):
+        keys = self.world.sessions()
+        need(keys, "no_identity", "No agent identity: run inside a claude or codex session, or set LEDGER_SESSION.")
+        return keys[0]
+
+    def address(self):
+        """This caller's doorbell address, when the ledger is configured to ring through Reason."""
+        return self.world.reason_address() if self.config.get("doorbell") == "reason" else None
 
     def subject(self, task):
         lead = task["assign"].get("lead")
         return self.world.subject(lead["branch"], task["base"]) if lead else None
 
     def caller(self, s):
-        return s.actor_for_block(self.world.block())
-
-    def my_label(self):
-        panes = self.panes()
-        return label_name((panes or {}).get(self.world.block()))
+        return s.actor_for(self.world.sessions())
 
 
 def need(cond, code, message):
@@ -78,7 +104,7 @@ def as_driver(ctx, s):
 
 def as_bound(ctx, s):
     actor = ctx.caller(s)
-    need(actor, "unbound", "This pane is not bound to the ledger. A lead runs `ledger start <task>` first.")
+    need(actor, "unbound", "This session is not bound. Run `ledger start <task> --token <token>` from your brief.")
     return actor
 
 
@@ -104,6 +130,8 @@ def mutate(ctx, args, build):
 
 def ring(ctx, s, e):
     """Doorbells after the lock is released. The mail is already in the log."""
+    if ctx.config.get("doorbell") != "reason":
+        return []
     t = s.tasks.get(e.get("task"))
     k = e["kind"]
     targets = []  # (actor, fyi)
@@ -166,40 +194,45 @@ def parse_req(text):
 # --- commands: driver
 
 def cmd_init(ctx, args):
-    block = ctx.world.block()
-    need(block, "no_pane", "Run inside a Rex pane (REX_BLOCK is not set).")
+    session = ctx.session()
     if not ctx.store.exists():
         ctx.store.create()
-    reason = ctx.world.reason_address()
 
     def build(s):
+        caller = ctx.caller(s)
+        if s.driver and caller != "driver":
+            need(not caller, "worker", f"{caller} is an assignee and cannot become the driver.")
+            state = ctx.health(s.driver["session"])
+            need(state == "absent", "driver_alive",
+                 f"The driver session is {state}. To take over anyway: ledger rebind --human --why '<reason>'")
+        if args.launch is not None or args.doorbell is not None:
+            config = ctx.config | {k: v for k, v in (("launch", args.launch), ("doorbell", args.doorbell)) if v is not None}
+            (ctx.store.root / "config.json").write_text(json.dumps(config, indent=1) + "\n")
+        reason = ctx.address()
         if not s.driver:
-            return {"kind": "init", "actor": "driver", "block": block, "reason": reason}
-        if s.driver["block"] == block:
+            return {"kind": "init", "actor": "driver", "session": session, "reason": reason}
+        if caller == "driver":
             need(reason and reason != s.driver["reason"], "noop", "Already the driver.")
             return {"kind": "hello", "actor": "driver", "reason": reason}
-        need(not ctx.my_label(), "worker_pane", "A rex-agents worker pane cannot become the driver.")
-        state = model.health(ctx.panes(), s.driver["block"])
-        need(state == "absent", "driver_alive",
-             f"The driver pane is {state}. To take over anyway: ledger rebind --human --why '<reason>'")
-        return {"kind": "driver", "actor": "driver", "block": block, "reason": reason, "takeover": True}
+        return {"kind": "driver", "actor": "driver", "session": session, "reason": reason, "takeover": True}
     try:
-        return mutate(ctx, args, build)
+        out = mutate(ctx, args, build)
     except Refuse as exc:
-        if exc.code == "noop":
-            return {"ok": True, "noop": True}
-        raise
+        if exc.code != "noop":
+            raise
+        out = {"ok": True, "noop": True}
+    return out | {"config": ctx.config}
 
 
 def cmd_rebind(ctx, args):
-    block = ctx.world.block()
     need(args.human, "human_only", "rebind needs --human.")
-    need(block, "no_pane", "Run inside the pane that becomes the driver.")
     need(args.why, "missing_why", "rebind needs --why.")
-    reason = ctx.world.reason_address()
+    session = ctx.session()
+    reason = ctx.address()
     return mutate(ctx, args, lambda s: (need(s.driver, "no_ledger", "No ledger here."),
-                                        {"kind": "driver", "actor": "human", "block": block, "reason": reason,
+                                        {"kind": "driver", "actor": "human", "session": session, "reason": reason,
                                          "why": args.why, "human": True})[1])
+
 
 
 def cmd_new(ctx, args):
@@ -264,20 +297,18 @@ def cmd_waive(ctx, args):
     return mutate(ctx, args, build)
 
 
-def brief(s, t, role, name, branch, cwd):
+def brief(s, t, role, name, branch, cwd, token):
     mine = [r for r in t["reqs"].values() if r["role"] == role and not r["waived"]]
-    lines = [f"# {t['slug']} ({role}): {t['title']}", "",
-             f"Driver Reason address: {(s.driver or {}).get('reason')}.",
-             f"Worktree: {cwd} (branch {branch}).", "", "Requirements you prove:"]
+    lines = [f"# {t['slug']} ({role}): {t['title']}", "", f"You are {name}. Worktree: {cwd} (branch {branch}).",
+             "", "Requirements you prove:"]
     lines += [f"- {r['id']} ({r['kind']}): {r['text']}" for r in mine] or ["- none yet"]
     lines += ["", "Rules:",
-              f"1. From the worktree, run `ledger start {t['slug']}`.",
-              "2. Loop: `ledger next`, do the one action it names, repeat. On `idle`, end your turn; a doorbell wakes you.",
+              f"1. From the worktree, run `ledger start {t['slug']} --token {token}` once.",
+              "2. Loop: `ledger next --wait`, do the one action it names, repeat. Stop when it says `done`.",
               f"3. Prove on a clean, committed worktree: `ledger prove {t['slug']} <req> -- <cmd>` or `--file <path>`. "
               "Keep evidence files outside the worktree or committed.",
-              f"4. Questions: `ledger ask {t['slug']} \"<text>\" [--blocking]`. Ideas: `ledger propose {t['slug']} \"<idea>\"`. "
-              "Conversation: MCP send_message to the driver.",
-              "5. Never ask the user. Launch no workers. Leave the Rex session name alone."]
+              f"4. Questions: `ledger ask {t['slug']} \"<text>\" [--blocking]`. Ideas: `ledger propose {t['slug']} \"<idea>\"`.",
+              "5. Never ask the user. Launch no other agents."]
     return "\n".join(lines) + "\n"
 
 
@@ -295,23 +326,58 @@ def cmd_assign(ctx, args):
         cwd = str(Path(args.cwd).resolve()) if args.cwd else (lead and lead["cwd"])
         need(branch and cwd, "missing_worktree", "assign needs --branch and --cwd (a reviewer inherits the lead's).")
         prior = t["assign"].get(args.role)
-        path = ctx.store.briefs / f"{t['slug']}-{args.role}-{len(s.events) + 1}.md"
+        seq = len(s.events) + 1
+        path = ctx.store.briefs / f"{t['slug']}-{args.role}-{seq}.md"
         ctx.store.briefs.mkdir(parents=True, exist_ok=True)
-        path.write_text(brief(s, t, args.role, args.name, branch, cwd))
+        token = secrets.token_hex(8)
+        path.write_text(brief(s, t, args.role, args.name, branch, cwd, token))
+        path.chmod(0o600)
         return {"kind": "assign", "actor": "driver", "task": args.task, "role": args.role, "name": args.name,
-                "branch": branch, "cwd": cwd, "brief": str(path),
+                "branch": branch, "cwd": cwd, "brief": str(path), "token_sha": _sha(token),
+                "launch": "auto" if ctx.config.get("launch") else "manual",
                 "replaced": [prior["name"]] if prior and prior["name"] != args.name else []}
     out = mutate(ctx, args, build)
     e = out["event"]
-    out["launch"] = launch_command(e, ctx.state)
+    out["launch"] = launch(ctx, e)
     return out
 
 
-def launch_command(e, s):
-    t = s.tasks.get(e["task"])
-    place = f"--with {s.holder(t, 'lead')}" if e["role"] == "reviewer" and t and s.holder(t, "lead") else "--tab"
-    return (f"rex-agents launch {place} --name {e['name']} --cwd {e['cwd']} "
-            f"--model <model> --effort <effort> --task-file {e['brief']}")
+def _sha(text):
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def launch_paths(ctx, e):
+    d = ctx.store.root / "launch"
+    return d / f"{e['seq']}.log", d / f"{e['seq']}.status"
+
+
+def launch(ctx, e):
+    """Run the configured launch template for an assignment, or say how to start the agent by hand."""
+    template = ctx.config.get("launch")
+    if not template:
+        return {"manual": f"Start an agent in {e['cwd']} and give it the brief at {e['brief']}."}
+    log, status = launch_paths(ctx, e)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    fields = {k: e[k] for k in ("name", "role", "task", "cwd", "brief")} | {"log": str(log)}
+    command = template.format(**{k: shlex.quote(str(v)) for k, v in fields.items()})
+    old = ctx.world.cwd
+    ctx.world.cwd = e["cwd"]
+    try:
+        pid = ctx.world.spawn(command, log, status)
+    finally:
+        ctx.world.cwd = old
+    return {"command": command, "pid": pid, "log": str(log)}
+
+
+def launch_state(ctx, e):
+    """running | exited:<code> | manual, from the launch status file."""
+    if e.get("launch") != "auto":
+        return "manual"
+    _, status = launch_paths(ctx, e)
+    try:
+        return "exited:" + status.read_text().strip()
+    except OSError:
+        return "running"
 
 
 def current_proof(s, seq):
@@ -435,28 +501,24 @@ def cmd_drop(ctx, args):
 # --- commands: assignees
 
 def cmd_start(ctx, args):
-    block = ctx.world.block()
-    need(block, "no_pane", "Run inside your Rex pane (REX_BLOCK is not set).")
-    need(not ctx.world.env.get("CODEX_THREAD_ID"), "unsupported_harness",
-         "Codex leads are not supported yet. Ask the driver to relaunch this role with a Claude model.")
-    name = ctx.my_label()
-    need(name, "no_label", "This pane has no rex-agents label, or Rex did not answer.")
-    reason = ctx.world.reason_address()
+    session = ctx.session()
+    reason = ctx.address()
 
     def build(s):
         t = task_of(s, args.task)
-        roles = s.roles_of(name, t)
-        need(roles, "not_assigned", f"{name} is not assigned to {args.task}.")
-        role = roles[0]
+        role = next((r for r, a in t["assign"].items() if a["token"] == _sha(args.token)), None)
+        need(role, "bad_token", f"That token does not match a current assignment on {args.task}.")
         a = t["assign"][role]
-        if a["block"] == block:
+        if a["session"] in ctx.world.sessions():
             raise Refuse("noop", "already started")
-        if a["block"]:
-            state = model.health(ctx.panes(), a["block"])
-            need(state == "absent", "bound_elsewhere", f"{name} is bound to another pane that is {state}.")
+        if a["session"]:
+            state = ctx.health(a["session"])
+            need(state == "absent", "bound_elsewhere", f"{a['name']} is bound to another session that is {state}.")
+        need(ctx.caller(s) in (None, a["name"]), "other_actor", "This session is already bound to another actor.")
         need(ctx.world.branch(ctx.world.cwd) == a["branch"], "wrong_branch",
              f"Run start from the worktree on branch {a['branch']} ({a['cwd']}).")
-        return {"kind": "start", "actor": name, "task": args.task, "role": role, "block": block, "reason": reason}
+        return {"kind": "start", "actor": a["name"], "task": args.task, "role": role, "session": session,
+                "reason": reason}
     try:
         return mutate(ctx, args, build)
     except Refuse as exc:
@@ -470,7 +532,7 @@ def prove_guard(ctx, s, args):
     t = task_of(s, args.task)
     r = t["reqs"].get(args.req)
     need(r and not r["waived"], "unknown_requirement", f"No active requirement {args.req}.")
-    need(s.holder(t, r["role"]) == actor and t["assign"][r["role"]]["block"] == ctx.world.block(), "wrong_role",
+    need(s.holder(t, r["role"]) == actor and t["assign"][r["role"]]["session"] in ctx.world.sessions(), "wrong_role",
          f"Only the bound {r['role']} proves {args.req}.")
     need(ctx.world.branch(ctx.world.cwd) == t["assign"][r["role"]]["branch"], "wrong_branch",
          f"Prove from the task branch {t['assign'][r['role']]['branch']}.")
@@ -591,7 +653,7 @@ def cmd_decision(ctx, args):
 
 
 def cmd_hello(ctx, args):
-    reason = ctx.world.reason_address()
+    reason = ctx.address()
 
     def build(s):
         actor = as_bound(ctx, s)
@@ -621,7 +683,7 @@ def views(ctx, s):
             "task": t["slug"], "title": t["title"], "area": t["area"], "priority": t["priority"], "rev": t["rev"],
             "progress": model.progress(s, t, subject), "candidate": subject and subject["commit"],
             "assignees": {role: {"name": a["name"], "branch": a["branch"], "cwd": a["cwd"],
-                                 "health": model.health(ctx.panes(), a["block"]) if a["block"] else "not-started"}
+                                 "health": ctx.health(a["session"]) if a["session"] else "not-started"}
                           for role, a in t["assign"].items()},
             "blockers": model.blockers(s, t), "requirements": reqs}
     return out
@@ -658,16 +720,14 @@ def driver_next(ctx, s, vs):
                     evidence=[e["path"] for e in p["evidence"]])
     for v in tasks:
         for role, a in v["assignees"].items():
-            if a["health"] == "absent":
-                return item("relaunch", v, f"{role} {a['name']} of {v['task']} has no pane.",
-                            [launch_command(_assign_event(s, v["task"], role), s)])
-    panes = ctx.panes() or {}
-    names = {label_name(lbl) for lbl in panes.values()}
-    for v in tasks:
-        for role, a in v["assignees"].items():
-            if a["health"] == "not-started" and ctx.panes() is not None and a["name"] not in names:
-                return item("launch", v, f"Launch {a['name']} as {role} of {v['task']}.",
-                            [launch_command(_assign_event(s, v["task"], role), s)])
+            e = _assign_event(s, v["task"], role)
+            state = launch_state(ctx, e)
+            gone = a["health"] == "absent" or (a["health"] == "not-started" and state.startswith("exited:")
+                                                and state != "exited:0")
+            if gone:
+                return item("relaunch", v, f"{role} {a['name']} of {v['task']} is gone ({a['health']}, launch {state}). "
+                            "Assign it again; that issues a fresh brief and token.",
+                            [f"ledger assign {v['task']} {a['name']} --role {role}"])
     for v in tasks:
         if v["progress"] == "unassigned":
             return item("assign", v, f"Assign a lead to {v['task']}.",
@@ -690,7 +750,9 @@ def driver_next(ctx, s, vs):
                      f"ledger decline {r['seq']} --why \"<reason>\""])
     for r in asks:
         return item("answer", r, f"{r['from']} asks: {r['text']}", [f"ledger answer {r['seq']} \"<answer>\""])
-    return {"action": "idle", "prompt": "Nothing waits on you. End your turn."}
+    if s.tasks and not tasks and not box and not decided:
+        return {"action": "done", "prompt": "Every task has ended and nothing waits on you."}
+    return {"action": "idle", "prompt": "Nothing waits on you. End your turn, or run `ledger next --wait`."}
 
 
 def _assign_event(s, slug, role):
@@ -698,7 +760,7 @@ def _assign_event(s, slug, role):
     return s.events[seq - 1]
 
 
-def lead_next(ctx, s, vs, name, block):
+def lead_next(ctx, s, vs, name, keys):
     mine = []
     for t in s.open_tasks():
         for role, a in t["assign"].items():
@@ -712,10 +774,12 @@ def lead_next(ctx, s, vs, name, block):
         return item("answer", r, f"{model.asker(s, r)} asks: {r['text']}", [f"ledger answer {r['seq']} \"<answer>\""])
     mine.sort(key=lambda x: order(vs[x[0]["slug"]]))
     for t, role, a in mine:
-        if a["block"] != block:
+        if a["session"] not in keys:
             return {"action": "start", "task": t["slug"], "cwd": a["cwd"], "brief": a["brief"],
-                    "prompt": f"Read your brief, then start {t['slug']} from {a['cwd']}.",
-                    "commands": [f"cd {a['cwd']} && ledger start {t['slug']}"]}
+                    "prompt": f"You hold a new assignment. Read {a['brief']}, then run its start command from {a['cwd']}.",
+                    "commands": [f"cat {a['brief']}"]}
+    if not mine:
+        return {"action": "done", "prompt": "You hold no open assignment. Stop."}
     for t, role, a in mine:
         waiting = [r for r in model.task_requests(s, t) if r["type"] == "ask" and r["status"] == "open"
                    and r["blocking"] and model.asker(s, r) == name]
@@ -731,7 +795,7 @@ def lead_next(ctx, s, vs, name, block):
                 return {"action": "prove", "task": t["slug"], "cwd": a["cwd"],
                         "prompt": f"{rv['status'].capitalize()} {rid}: {rv['text']}.{why} Do the work, commit, prove.",
                         "commands": [f"ledger prove {t['slug']} {rid} -- <cmd>", f"ledger prove {t['slug']} {rid} --file <path>"]}
-    return {"action": "idle", "prompt": "Everything waits on others. End your turn; a doorbell wakes you."}
+    return {"action": "idle", "prompt": "Everything waits on others. Run `ledger next --wait`."}
 
 
 def lead_done(view):
@@ -744,20 +808,35 @@ def item(action, x, prompt, commands, **extra):
             "prompt": prompt, "commands": commands, **extra}
 
 
-def cmd_next(ctx, args):
+def next_once(ctx):
     s = ctx.load()
+    ctx._alive = {}
     vs = views(ctx, s)
-    actor = ctx.caller(s)
+    actor = as_bound(ctx, s)
     if actor == "driver":
         return {"actor": "driver", **driver_next(ctx, s, vs)}
-    name = actor or ctx.my_label()
-    need(name, "unbound", "This pane is neither the driver nor a labeled worker.")
-    return {"actor": name, **lead_next(ctx, s, vs, name, ctx.world.block())}
+    return {"actor": actor, **lead_next(ctx, s, vs, actor, ctx.world.sessions())}
+
+
+def cmd_next(ctx, args):
+    """One action. With --wait, block until something other than idle, polling the log."""
+    out = next_once(ctx)
+    deadline = time.monotonic() + (args.timeout if args and args.wait else 0)
+    stamp = None
+    while out["action"] == "idle" and time.monotonic() < deadline:
+        time.sleep(2)
+        now = ctx.store.log.stat().st_mtime_ns
+        if now != stamp:
+            stamp = now
+            out = next_once(ctx)
+        elif int(time.monotonic()) % 30 == 0:
+            out = next_once(ctx)  # liveness and launch state change without a log write
+    return out
 
 
 def cmd_inbox(ctx, args):
     s = ctx.load()
-    actor = "human" if args.human else (ctx.caller(s) or ctx.my_label())
+    actor = "human" if args.human else ctx.caller(s)
     need(actor, "unbound", "Unknown caller; use --human for the human queue.")
     box = model.inbox(s, actor)
     key = (lambda r: (not r["blocking"], s.tasks[r["task"]]["priority"] if r["task"] in s.tasks else "p9", r["seq"]))
@@ -796,15 +875,14 @@ def hook_session_start(world):
         payload = json.loads(sys.stdin.read() or "{}")
         world.cwd = payload.get("cwd") or world.cwd
         ctx = Ctx(world)
-        if not ctx.store.exists() or not world.block():
+        if not ctx.store.exists():
             return 0
         s = ctx.load()
-        if not (ctx.caller(s) or any(a["name"] == ctx.my_label() for t in s.open_tasks() for a in t["assign"].values())):
+        if not ctx.caller(s):
             return 0
-        if ctx.caller(s):
-            cmd_hello(ctx, argparse.Namespace(request_id=None))
+        cmd_hello(ctx, argparse.Namespace(request_id=None))
         nxt = cmd_next(ctx, None)
-        text = (f"Ledger ({ctx.repo}): you are {nxt['actor']}. Work by looping on `ledger next` until it says idle.\n"
+        text = (f"Ledger ({ctx.repo}): you are {nxt['actor']}. Work by looping on `ledger next --wait` until it says done.\n"
                 f"Next: {json.dumps(nxt)}")
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}))
     except Exception:  # a hook must never break a session
@@ -827,7 +905,8 @@ def parser():
         return sp
     A = lambda *names, **kw: (names, kw)
     task, why = A("task"), A("--why", required=False)
-    add("init", cmd_init)
+    add("init", cmd_init, A("--launch", help="launch template: {name} {role} {task} {cwd} {brief} {log}"),
+        A("--doorbell", choices=("none", "reason")))
     add("rebind", cmd_rebind, A("--human", action="store_true"), why)
     add("new", cmd_new, task, A("title"), A("--req", action="append", default=[]), A("--area"),
         A("--priority", default="p2"), A("--merge", action="store_true"), A("--base", default="main"),
@@ -845,7 +924,7 @@ def parser():
     add("decline", cmd_decline, A("request", type=int), A("--why", required=True))
     add("close", cmd_close, task, A("--candidate", required=True), A("--rev", type=int, required=True), A("--merged"))
     add("drop", cmd_drop, task, A("why"))
-    add("start", cmd_start, task)
+    add("start", cmd_start, task, A("--token", required=True))
     add("prove", cmd_prove, task, A("req"), A("--file", action="append", default=[]))
     add("ask", cmd_ask, task, A("text"), A("--to"), A("--blocking", action="store_true"))
     add("answer", cmd_answer, A("request", type=int), A("text"))
@@ -853,7 +932,7 @@ def parser():
     add("propose", cmd_propose, A("task", nargs="?"), A("text"), A("--area"), A("--attach", action="append", default=[]))
     add("decision", cmd_decision, A("request", type=int), A("option"), A("--human", action="store_true"), why)
     add("hello", cmd_hello)
-    add("next", cmd_next)
+    add("next", cmd_next, A("--wait", action="store_true"), A("--timeout", type=int, default=100, help="seconds to wait (default 100)"))
     add("inbox", cmd_inbox, A("--human", action="store_true"))
     add("board", cmd_board)
     add("show", cmd_show, task)

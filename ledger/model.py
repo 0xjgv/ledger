@@ -7,7 +7,7 @@ PRIORITIES = ("p0", "p1", "p2", "p3")
 
 class State:
     def __init__(self):
-        self.driver = None          # {"block", "reason"}
+        self.driver = None          # {"session", "reason"}
         self.directory = {}         # actor -> Reason address
         self.tasks = {}             # slug -> task dict
         self.proofs = {}            # seq -> proof event
@@ -16,15 +16,21 @@ class State:
         self.events = []
 
     # --- queries
-    def actor_for_block(self, block):
-        if not block:
+    def actor_for(self, keys):
+        """The actor bound to any of the caller's identity keys: open tasks first, then ended ones."""
+        keys = set(filter(None, keys))
+        if not keys:
             return None
-        if self.driver and self.driver["block"] == block:
+        if self.driver and self.driver["session"] in keys:
             return "driver"
-        for t in self.open_tasks():
+        tasks = sorted(self.tasks.values(), key=lambda t: t["status"] != "open")
+        for t in tasks:
             for a in t["assign"].values():
-                if a["block"] == block:
+                if a["session"] in keys:
                     return a["name"]
+        for e in reversed(self.events):  # a reassigned lead keeps its name, to be told to stop
+            if e["kind"] == "start" and (e.get("session") or e.get("block")) in keys:
+                return e["actor"]
         return None
 
     def open_tasks(self):
@@ -57,7 +63,7 @@ def _apply(s, e):
     if t is not None:
         t["rev"] = e["seq"]
     if k in ("init", "driver"):
-        s.driver = {"block": e["block"], "reason": e.get("reason")}
+        s.driver = {"session": e.get("session") or e.get("block"), "reason": e.get("reason")}
     elif k == "hello" and actor == "driver":
         s.driver["reason"] = e["reason"]
     elif k == "new":
@@ -78,9 +84,10 @@ def _apply(s, e):
         _drop_review_requests(s, t, e["req"])
     elif k == "assign":
         t["assign"][e["role"]] = {"name": e["name"], "branch": e["branch"], "cwd": e["cwd"], "seq": e["seq"],
-                                  "block": None, "brief": e.get("brief")}
+                                  "session": None, "brief": e.get("brief"), "token": e.get("token_sha"),
+                                  "launch": e.get("launch")}
     elif k == "start":
-        t["assign"][e["role"]]["block"] = e["block"]
+        t["assign"][e["role"]]["session"] = e.get("session") or e.get("block")
     elif k == "prove":
         s.proofs[e["seq"]] = dict(e, verdict=None)
         req = t["reqs"][e["req"]]
@@ -157,12 +164,12 @@ def fresh(proved, current, kind):
     return proved["commit"] == current["commit"] and proved["base"] == current["base"]
 
 
-def health(panes, block):
-    if not block:
+def health(alive, session):
+    """present | absent | unknown for a bound session, given alive(session) -> True/False/None."""
+    if not session:
         return None
-    if panes is None:
-        return "unknown"
-    return "present" if block in panes else "absent"
+    state = alive(session)
+    return "unknown" if state is None else ("present" if state else "absent")
 
 
 def progress(s, task, subject):
@@ -171,7 +178,7 @@ def progress(s, task, subject):
     lead = task["assign"].get("lead")
     if not lead:
         return "unassigned"
-    if not lead["block"]:
+    if not lead["session"]:
         return "assigned"
     states = [req_status(s, task, r, subject)[0] for r in task["reqs"].values()]
     if any(x in ("missing", "rejected", "stale") for x in states):
