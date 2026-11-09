@@ -127,7 +127,9 @@ def ring(ctx, s, e):
         targets = [("driver", False)]
     elif k == "assign":
         targets = [(e["name"], False)] + [(n, False) for n in e.get("replaced", [])]
-    elif k in ("close", "drop", "require", "waive"):
+    elif k == "require" and t:
+        targets = [(s.holder(t, e["req"]["role"]), False)]
+    elif k in ("close", "drop", "waive"):
         targets = [(a["name"], True) for a in (t["assign"].values() if t else [])]
     me = (s.driver or {}).get("reason") if e.get("actor") == "driver" else s.directory.get(e.get("actor"))
     out = []

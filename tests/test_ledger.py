@@ -136,6 +136,14 @@ class Wakeups(Bed):
         self.assertEqual(self.run_as("rev", "next")["action"], "prove")
 
 
+class RequireWakes(Bed):
+    def test_new_requirement_wakes_its_role_holder(self):
+        self.setup_task()
+        self.rings.clear()
+        self.run_as("driver", "require", "t1", "fixes:lead:tree:fix review findings")
+        self.assertEqual([(r[0], r[2]) for r in self.rings], [("me/lead", False)])
+
+
 class Proofs(Bed):
     def test_dirty_worktree_refused(self):
         self.setup_task()
