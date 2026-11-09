@@ -1,7 +1,6 @@
 """Outside facts: git, the caller's agent process, and optional host hooks. Tests replace World with a fake."""
 import os
 import shlex
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -19,16 +18,13 @@ class World:
         """Identity keys for the caller, strongest first.
 
         LEDGER_SESSION overrides; otherwise the nearest agent harness process (pid + start time),
-        which survives context compaction and /clear. REX_BLOCK is read only for logs written by
-        ledger 0.1."""
+        which survives context compaction and /clear."""
         keys = []
         if self.env.get("LEDGER_SESSION"):
             keys.append("env:" + self.env["LEDGER_SESSION"])
         proc = self.harness()
         if proc:
             keys.append(proc)
-        if self.env.get("REX_BLOCK"):
-            keys.append(self.env["REX_BLOCK"])
         return keys
 
     def harness(self):
@@ -64,21 +60,12 @@ class World:
                                  stdin=subprocess.DEVNULL, start_new_session=True, cwd=self.cwd)
         return p.pid
 
-    def reason_address(self):
-        import json
+    def shell(self, command):
+        """(ok, stdout or error) for a configured shell command."""
         try:
-            data = json.loads(_run([_reason(), "who", "--json"]))
-            return next((s["address"] for s in data.get("sessions", []) if s.get("is_me")), None)
-        except (OSError, ValueError, subprocess.SubprocessError):
-            return None
-
-    def ring(self, to, text, fyi=False, notify=False):
-        argv = [_reason(), "send"] + (["--fyi"] if fyi else []) + (["--notify"] if notify else []) + [to, text]
-        try:
-            _run(argv)
-            return None
+            return True, _run(["/bin/sh", "-c", command], cwd=self.cwd).strip()
         except (OSError, subprocess.SubprocessError) as exc:
-            return str(exc)
+            return False, str(exc)
 
     # --- git
     def git(self, *args, cwd=None):
@@ -128,10 +115,6 @@ def _ps(pid):
     parts = out.split()
     # lstart is five fields: Mon Nov  9 12:21:01 2026
     return int(parts[0]), " ".join(parts[1:6]), " ".join(parts[6:])
-
-
-def _reason():
-    return shutil.which("reason-network") or str(Path.home() / ".reason/bin/reason-network")
 
 
 def _run(argv, cwd=None):

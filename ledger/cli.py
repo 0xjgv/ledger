@@ -42,14 +42,7 @@ class Ctx:
         try:
             return json.loads((self.store.root / "config.json").read_text())
         except (OSError, ValueError):
-            pass
-        # Ledgers started by 0.1 ran on Rex and rang Reason; keep them ringing.
-        try:
-            with open(self.store.log) as fh:
-                first = json.loads(fh.readline() or "{}")
-        except (OSError, ValueError):
-            first = {}
-        return {"doorbell": "reason"} if "block" in first else {}
+            return {}
 
     def load(self):
         try:
@@ -73,8 +66,12 @@ class Ctx:
         return keys[0]
 
     def address(self):
-        """This caller's doorbell address, when the ledger is configured to ring through Reason."""
-        return self.world.reason_address() if self.config.get("doorbell") == "reason" else None
+        """This caller's doorbell address, from the configured `whoami` command."""
+        command = self.config.get("whoami")
+        if not command:
+            return None
+        ok, out = self.world.shell(command)
+        return out if ok and out else None
 
     def subject(self, task):
         lead = task["assign"].get("lead")
@@ -130,7 +127,8 @@ def mutate(ctx, args, build):
 
 def ring(ctx, s, e):
     """Doorbells after the lock is released. The mail is already in the log."""
-    if ctx.config.get("doorbell") != "reason":
+    template = ctx.config.get("ring")
+    if not template:
         return []
     t = s.tasks.get(e.get("task"))
     k = e["kind"]
@@ -162,21 +160,15 @@ def ring(ctx, s, e):
     me = (s.driver or {}).get("reason") if e.get("actor") == "driver" else s.directory.get(e.get("actor"))
     out = []
     for actor, fyi in targets:
-        if not actor:
+        if not actor or fyi or actor == "human":  # FYI waits for the next `next`; humans read their inbox
             continue
-        if actor == "human":
-            person = ((s.driver or {}).get("reason") or "").split("/")[0]
-            addr, notify = person or None, True
-            text = f"[ledger] decision needed #{e['seq']}: {e.get('question')} · run: ledger inbox --human"
-        else:
-            addr = (s.driver or {}).get("reason") if actor == "driver" else s.directory.get(actor)
-            notify = False
-            text = f"[ledger] {e.get('task') or '-'} #{e['seq']} {k} from {e.get('actor')} · run: ledger next"
+        addr = (s.driver or {}).get("reason") if actor == "driver" else s.directory.get(actor)
         if not addr or addr == me:
             out.append({"to": actor, "sent": False, "error": "no address" if not addr else "self"})
             continue
-        err = ctx.world.ring(addr, text, fyi=fyi, notify=notify)
-        out.append({"to": actor, "address": addr, "sent": err is None, **({"error": err} if err else {})})
+        text = f"[ledger] {e.get('task') or '-'} #{e['seq']} {k} from {e.get('actor')} · run: ledger next"
+        ok, detail = ctx.world.shell(template.format(address=shlex.quote(addr), text=shlex.quote(text)))
+        out.append({"to": actor, "address": addr, "sent": ok, **({} if ok else {"error": detail})})
     return out
 
 
@@ -205,8 +197,9 @@ def cmd_init(ctx, args):
             state = ctx.health(s.driver["session"])
             need(state == "absent", "driver_alive",
                  f"The driver session is {state}. To take over anyway: ledger rebind --human --why '<reason>'")
-        if args.launch is not None or args.doorbell is not None:
-            config = ctx.config | {k: v for k, v in (("launch", args.launch), ("doorbell", args.doorbell)) if v is not None}
+        given = {k: getattr(args, k) for k in ("launch", "ring", "whoami") if getattr(args, k) is not None}
+        if given:
+            config = ctx.config | given
             (ctx.store.root / "config.json").write_text(json.dumps(config, indent=1) + "\n")
         reason = ctx.address()
         if not s.driver:
@@ -870,7 +863,7 @@ def cmd_log(ctx, args):
 # --- hook
 
 def hook_session_start(world):
-    """SessionStart hook: refresh the Reason address and inject the next action. Never fails."""
+    """SessionStart hook: refresh the doorbell address and inject the next action. Never fails."""
     try:
         payload = json.loads(sys.stdin.read() or "{}")
         world.cwd = payload.get("cwd") or world.cwd
@@ -905,8 +898,9 @@ def parser():
         return sp
     A = lambda *names, **kw: (names, kw)
     task, why = A("task"), A("--why", required=False)
-    add("init", cmd_init, A("--launch", help="launch template: {name} {role} {task} {cwd} {brief} {log}"),
-        A("--doorbell", choices=("none", "reason")))
+    add("init", cmd_init, A("--launch", help="command that starts an agent: {name} {role} {task} {cwd} {brief} {log}"),
+        A("--ring", help="command that wakes an agent: {address} {text}"),
+        A("--whoami", help="command that prints the caller's address for --ring"))
     add("rebind", cmd_rebind, A("--human", action="store_true"), why)
     add("new", cmd_new, task, A("title"), A("--req", action="append", default=[]), A("--area"),
         A("--priority", default="p2"), A("--merge", action="store_true"), A("--base", default="main"),

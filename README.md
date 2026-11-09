@@ -9,7 +9,7 @@ A per-repo state machine for a driver agent (chief of staff) and its long-lived 
 - Inbox: open requests (asks, proofs to review, ideas, human decisions). `ledger next` returns one action; `ledger next --wait` blocks until there is one.
 
 ```sh
-ledger init [--launch '<template>'] [--doorbell reason]   # driver
+ledger init [--launch <cmd>] [--ring <cmd>] [--whoami <cmd>]  # driver
 ledger new <slug> "<title>" --req "tests:lead:tree:tests pass" [--merge]
 ledger assign <slug> <lead> --branch <b> --cwd <worktree>  # writes a brief with a one-time token
 ledger start <slug> --token <token>                         # lead, from its brief
@@ -21,12 +21,26 @@ ledger decision <id> <option> --human --why "<reason>"
 
 ## Hosts
 
-The ledger runs anywhere an agent has a shell. Two optional settings adapt it to a host:
+The ledger contains no host-specific code. Three optional commands, set once with `ledger init`, adapt it to a host:
 
-- `--launch` is a shell template that `assign` runs to start the agent. Fields: `{name} {role} {task} {cwd} {brief} {log}`. Without it, `assign` tells the driver where the brief is.
-  - Headless: `claude -p --model haiku --dangerously-skip-permissions "$(cat {brief})" > {log} 2>&1`
-  - rex-agents: `rex-agents launch --tab --name {name} --cwd {cwd} --model claude-opus-5-5 --effort medium --task-file {brief}`
-- `--doorbell reason` wakes agents through `reason-network`. Without it, agents wait with `ledger next --wait`.
+- `--launch`: starts an agent for an assignment. Fields: `{name} {role} {task} {cwd} {brief} {log}`. Without it, `assign` tells the driver where the brief is.
+- `--ring`: wakes an agent. Fields: `{address} {text}`.
+- `--whoami`: prints the caller's address for `--ring`. It runs on `start`, `init`, and each session start.
+
+Without `--ring`, agents wait with `ledger next --wait`. Examples:
+
+```sh
+# Headless Claude Code agents, no wake-ups
+ledger init --launch 'claude -p --model haiku --dangerously-skip-permissions "$(cat {brief})" > {log} 2>&1'
+
+# rex-agents panes, woken through Reason
+ledger init \
+  --launch 'rex-agents launch --tab --name {name} --cwd {cwd} --model claude-opus-5-5 --effort medium --task-file {brief}' \
+  --ring 'reason-network send {address} {text}' \
+  --whoami 'reason-network who --json | python3 -c "import json,sys; print(next(s[\"address\"] for s in json.load(sys.stdin)[\"sessions\"] if s[\"is_me\"]))"'
+```
+
+A ledger started by 0.1 identified agents by Rex pane. After upgrading, the driver takes it over once with `ledger rebind --human --why "<reason>"`.
 
 ## Install
 

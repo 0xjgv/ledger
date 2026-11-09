@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import shlex
 import re
 import os
 import subprocess
@@ -33,11 +34,12 @@ class Fake(World):
     def alive(self, session):
         return self.bed.alive.get(session)
 
-    def reason_address(self):
-        return self.address
-
-    def ring(self, to, text, fyi=False, notify=False):
-        self.bed.rings.append((to, text, fyi, notify))
+    def shell(self, command):
+        if command == "whoami":
+            return True, self.address or ""
+        argv = shlex.split(command)
+        self.bed.rings.append((argv[1], argv[2], False, False))
+        return True, ""
 
     def spawn(self, command, log_path, status_path):
         self.bed.spawned.append(command)
@@ -71,7 +73,7 @@ class Bed(unittest.TestCase):
         return data
 
     def init(self):
-        return self.run_as("driver", "init", "--doorbell", "reason")
+        return self.run_as("driver", "init", "--ring", "ring {address} {text}", "--whoami", "whoami")
 
     def assign(self, task, name, *extra):
         e = self.run_as("driver", "assign", task, name, *extra)["event"]
@@ -377,13 +379,13 @@ class Store(Bed):
         log.write_text(log.read_text().replace("{", "{x", 1))
         self.assertEqual(self.run_as("driver", "board", expect=2)["code"], "corrupt_log")
 
-    def test_ledger_from_0_1_keeps_its_rex_identity_and_doorbell(self):
+    def test_ledger_from_0_1_loads_and_needs_a_human_rebind(self):
         log = self.repo / ".git/ledger/events.jsonl"
         log.parent.mkdir(parents=True)
         log.write_text(json.dumps({"seq": 1, "kind": "init", "actor": "driver", "block": "blk-1", "reason": "me/d"}) + "\n")
-        self.alive["blk-1"] = True
-        self.run_as(("blk-1", "me/d", self.repo), "new", "t2", "x", "--req", "a:lead:tree:x")
-        self.assertEqual(self.run_as(("blk-1", "me/d", self.repo), "next")["action"], "assign")
+        self.assertEqual(self.run_as("driver", "init", expect=2)["code"], "driver_alive")
+        self.run_as("driver", "rebind", "--human", "--why", "moved to 0.2")
+        self.run_as("driver", "new", "t2", "x", "--req", "a:lead:tree:x")
 
     def test_hook_injects_next_action(self):
         self.setup_task()
