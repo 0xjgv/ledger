@@ -3,7 +3,9 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,11 +17,16 @@ class Ledger(unittest.TestCase):
     def setUp(self):
         self.repo = Path(tempfile.mkdtemp())
         subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
-        self.env = {k: v for k, v in os.environ.items() if k != "LEDGER_AS"}
+        self.env = {k: v for k, v in os.environ.items() if k not in ("LEDGER_AS", "LEDGER_DIR")}
 
-    def run_l(self, *argv, who=None, ok=True):
+    def test_env_strips_ledger_vars(self):
+        with unittest.mock.patch.dict(os.environ, LEDGER_AS="ana", LEDGER_DIR="/live/store"):
+            self.setUp()
+        self.assertFalse({"LEDGER_AS", "LEDGER_DIR"} & self.env.keys())
+
+    def run_l(self, *argv, who=None, ok=True, cwd=None):
         env = dict(self.env, LEDGER_AS=who) if who else self.env
-        r = subprocess.run([sys.executable, str(ROOT / "bin/ledger"), *argv], cwd=self.repo, env=env,
+        r = subprocess.run([sys.executable, str(ROOT / "bin/ledger"), *argv], cwd=cwd or self.repo, env=env,
                            capture_output=True, text=True)
         if ok:
             self.assertEqual(r.returncode, 0, r.stderr)
@@ -53,6 +60,12 @@ class Ledger(unittest.TestCase):
         self.assertIn("exists", self.run_l("new", "x", "again", ok=False).stderr)
         self.assertIn("key=value", self.run_l("set", "x", "oops", ok=False).stderr)
         self.assertEqual(len(self.log()), 1)
+
+    def test_same_state_is_allowed(self):
+        self.run_l("new", "x", "X")
+        self.run_l("set", "x", "state=active")
+        self.run_l("set", "x", "state=active")
+        self.assertEqual(self.json("show", "x")["state"], "active")
 
     def test_field_clears(self):
         self.run_l("new", "x", "X", "--lead", "ana")
@@ -108,6 +121,59 @@ class Ledger(unittest.TestCase):
     def test_inbox_wait_times_out(self):
         r = self.run_l("inbox", "--wait", "--timeout", "0")
         self.assertIn("inbox empty", r.stdout)
+
+    def test_inbox_wait_after(self):
+        self.run_l("new", "x", "X")
+        self.run_l("ask", "x", "old?")
+        start = time.monotonic()
+        r = self.run_l("inbox", "--wait", "--after", "2", "--timeout", "1")
+        self.assertGreaterEqual(time.monotonic() - start, 1)
+        self.assertIn("#2 [x] driver → driver", r.stdout)
+        self.assertTrue(r.stdout.endswith("head: 2\n"))
+        p = subprocess.Popen([sys.executable, str(ROOT / "bin/ledger"), "inbox", "--wait", "--after", "2", "--json"],
+                             cwd=self.repo, env=self.env, stdout=subprocess.PIPE, text=True)
+        time.sleep(1)
+        self.run_l("ask", "x", "new?", who="ana")
+        out, _ = p.communicate(timeout=10)
+        self.assertEqual([i["text"] for i in json.loads(out)], ["old?", "new?"])
+
+    def test_inbox_wait_after_returns_answers(self):
+        self.run_l("new", "x", "X")
+        self.run_l("ask", "x", "merge?", "--to", "human")
+        self.run_l("answer", "2", "yes", who="human")
+        start = time.monotonic()
+        r = self.run_l("inbox", "--wait", "--after", "99", "--timeout", "30")
+        self.assertLess(time.monotonic() - start, 10)
+        self.assertIn("answered by human: yes", r.stdout)
+
+    def test_head(self):
+        self.assertEqual(self.run_l("inbox").stdout, "inbox empty for driver\nhead: 0\n")
+        self.run_l("new", "x", "X")
+        self.run_l("say", "x", "hi")
+        self.assertTrue(self.run_l("inbox").stdout.endswith("head: 2\n"))
+        self.assertEqual(self.json("board")["head"], self.log()[-1]["seq"])
+        self.assertIsInstance(self.json("inbox"), list)
+
+    def test_ledger_dir(self):
+        store = Path(tempfile.mkdtemp()) / "store"
+        self.env["LEDGER_DIR"] = str(store)
+        plain = Path(tempfile.mkdtemp())
+        self.run_l("new", "x", "X", "--lead", "ana", cwd=plain)
+        self.assertTrue((store / "events.jsonl").exists())
+        other = Path(tempfile.mkdtemp())
+        subprocess.run(["git", "init", "-q", str(other)], check=True)
+        self.assertEqual([t["id"] for t in self.json("board")["tasks"]], ["x"])
+        self.assertEqual([t["id"] for t in json.loads(self.run_l("board", "--json", cwd=other).stdout)["tasks"]], ["x"])
+        self.assertFalse((self.repo / ".git/ledger").exists() or (other / ".git/ledger").exists())
+        hook = [sys.executable, str(ROOT / "bin/ledger"), "_hook", "session-start"]
+        r = subprocess.run(hook, input=json.dumps({"cwd": str(other)}), env=dict(self.env, LEDGER_AS="ana"),
+                           capture_output=True, text=True)
+        self.assertIn("Your tasks: x (todo)", r.stdout)
+        for bad in ("rel/store", str(plain / "missing/store")):
+            self.env["LEDGER_DIR"] = bad
+            r = self.run_l("board", "--json", ok=False)
+            self.assertEqual((r.returncode, json.loads(r.stderr)["error"]), (1, "bad_dir"))
+        self.assertFalse((plain / "missing").exists())
 
     def test_bad_names_refused(self):
         self.assertIn("Bad name", self.run_l("board", "--as", "Bad Name", ok=False).stderr)

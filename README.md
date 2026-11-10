@@ -2,9 +2,9 @@
 
 A per-repo record of work for a driver agent (chief of staff) and its leads: tasks, who leads them, their state, messages, and one inbox. It records facts and never acts: no launching, waking, or verifying agents. It needs only git and Python 3.11+.
 
-- Store: append-only `events.jsonl` under `git rev-parse --git-common-dir`/ledger, written under a lock.
+- Store: append-only `events.jsonl` under `git rev-parse --git-common-dir`/ledger, written under a lock. `LEDGER_DIR=/abs/dir` uses that directory instead, from any cwd; its parent must exist.
 - Names: `--as <name>` or `LEDGER_AS`; the default is `driver`. Nothing checks them.
-- States: `todo → active → review → done`, plus `blocked` and `dropped`. `ledger set` refuses other moves.
+- States: `todo → active → review → done`, plus `blocked` and `dropped`. `ledger set` refuses other moves; setting the current state again is allowed.
 - Inbox: `ask` opens an item for a name (`driver` by default, `human` for you); `answer` closes it, and the answer shows once in the asker's inbox. Ending a task closes its items.
 
 ```sh
@@ -14,10 +14,12 @@ ledger say login "root cause: stale cookie"         # message on the task
 ledger ask login "Postgres or SQLite?" --wait       # blocks until answered (100s default)
 ledger ask - "Merge login?" --to human --option "merge: ship it" --option hold
 ledger answer 4 "merge"                             # --as human
-ledger inbox [--for human | --all] [--wait]
+ledger inbox [--for human | --all] [--wait [--after SEQ]]  # ends with "head: SEQ"; --after waits past it
 ledger board [--all]
 ledger show login | ledger show 4
 ```
+
+Re-arm a wait without a gap: pass the last `head:` (or `board --json`'s `"head"`) as `--after`; old open items no longer wake you, new ones and unseen answers do.
 
 Add `--json` to any command for machine output. Logs from 0.1 and 0.2 still load: tasks, leads, states, and requests carry over; proofs are dropped.
 

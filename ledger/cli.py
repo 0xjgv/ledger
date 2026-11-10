@@ -26,6 +26,10 @@ def need(cond, code, message):
 
 
 def open_store(cwd=None):
+    if d := os.environ.get("LEDGER_DIR"):
+        need(os.path.isabs(d) and Path(d).parent.is_dir(), "bad_dir",
+             f"LEDGER_DIR must be an absolute path whose parent exists: {d}")
+        return Store(d)
     r = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
                        cwd=cwd, capture_output=True, text=True)
     need(r.returncode == 0, "no_repo", "Not inside a git repository.")
@@ -102,7 +106,7 @@ def cmd_set(store, a):
         if "state" in fields:
             new, old = fields["state"], t["state"]
             need(new in model.STATES, "bad_state", f"States: {', '.join(model.STATES)}.")
-            need(new in model.FLOW[old], "bad_transition",
+            need(new == old or new in model.FLOW[old], "bad_transition",
                  f"{a.task} is {old}; it can move to: {', '.join(sorted(model.FLOW[old]))}.")
         return {"kind": "set", "task": a.task, "fields": fields}
     e = write(store, a.actor, build)
@@ -142,13 +146,13 @@ def cmd_answer(store, a):
 
 def cmd_inbox(store, a):
     name = None if a.all else (a.name or a.actor)
-    s = wait_for(store, lambda s: s.inbox(name), a.timeout if a.wait else 0)
+    s = wait_for(store, lambda s: any(i["n"] > a.after or i["status"] != "open" for i in s.inbox(name)),
+                 a.timeout if a.wait else 0)
     items = s.inbox(name)
     if name == a.actor:
         mark_seen(store, a.actor, items)
-    if not items:
-        return [], f"inbox empty{'' if name is None else ' for ' + name}"
-    return items, "\n".join(render_item(i) for i in items)
+    text = "\n".join(render_item(i) for i in items) or f"inbox empty{'' if name is None else ' for ' + name}"
+    return items, f"{text}\nhead: {s.head}"
 
 
 def cmd_board(store, a):
@@ -162,7 +166,7 @@ def cmd_board(store, a):
     lines += [f"{r['id']:<24} {r['state']:<8} {r['lead'] or '-':<16} {r['asks']:<4} {r['updated']:<20} {r['title']}"
               for r in rows]
     lines.append("inbox: " + (", ".join(f"{k} {v}" for k, v in sorted(counts.items())) or "empty"))
-    return {"tasks": rows, "inbox": counts}, "\n".join(lines)
+    return {"tasks": rows, "inbox": counts, "head": s.head}, "\n".join(lines)
 
 
 def cmd_show(store, a):
@@ -251,7 +255,8 @@ def parser():
         A("--to", default="driver"), A("--option", action="append", default=[], help='"id: description"'), *wait)
     add("answer", cmd_answer, "answer and close an inbox item", A("item", type=lambda v: int(v.lstrip("#"))), A("text"))
     add("inbox", cmd_inbox, "open items for you, and new answers to your asks", A("--for", dest="name"),
-        A("--all", action="store_true"), *wait)
+        A("--all", action="store_true"), *wait,
+        A("--after", type=int, default=0, help="with --wait: wake only for items numbered above SEQ, or answers"))
     add("board", cmd_board, "tasks and inbox counts", A("--all", action="store_true", help="include done and dropped"))
     add("show", cmd_show, "a task's history, or one item (#n)", A("ref"))
     add("version", cmd_version, "print the version")
