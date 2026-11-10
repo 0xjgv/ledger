@@ -17,6 +17,7 @@ class State:
         self.tasks = {}    # id -> task
         self.items = {}    # seq -> inbox item
         self.history = {}  # task id -> events
+        self.head = 0      # last seq folded
 
     def inbox(self, name=None):
         """Open items for name (all open items when None), plus answers to name's asks not yet seen."""
@@ -27,6 +28,7 @@ class State:
 def fold(events):
     s = State()
     for e in events:
+        s.head = e["seq"]
         if e.get("v") == 3:
             _apply(s, e)
         else:
