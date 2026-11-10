@@ -20,6 +20,8 @@ jobs:
         with:
           python-version: '3.13'
 
+      - uses: astral-sh/setup-uv@v6
+
       - name: Check the tag is on main and matches the version
         run: |
           git merge-base --is-ancestor HEAD origin/main
@@ -36,7 +38,8 @@ jobs:
 
       - name: Smoke-test the installer
         run: |
-          LEDGER_DOWNLOAD_BASE="$PWD/dist" LEDGER_HOME="$RUNNER_TEMP/home" LEDGER_BIN_DIR="$RUNNER_TEMP/bin" sh dist/install.sh
+          LEDGER_DOWNLOAD_BASE="$PWD/dist" LEDGER_HOME="$RUNNER_TEMP/home" LEDGER_BIN_DIR="$RUNNER_TEMP/bin" \
+            UV_TOOL_DIR="$RUNNER_TEMP/tools" sh dist/install.sh
           test "$("$RUNNER_TEMP/bin/ledger" version)" = "${GITHUB_REF_NAME#v}"
 
       - name: Publish
@@ -44,8 +47,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" dist/ledger-*.tar.gz dist/install.sh dist/checksums.txt --clobber
+            gh release upload "$GITHUB_REF_NAME" dist/ledger-*.whl dist/install.sh dist/checksums.txt --clobber
           else
-            gh release create "$GITHUB_REF_NAME" dist/ledger-*.tar.gz dist/install.sh dist/checksums.txt \
+            gh release create "$GITHUB_REF_NAME" dist/ledger-*.whl dist/install.sh dist/checksums.txt \
               --verify-tag --title "ledger $GITHUB_REF_NAME" --generate-notes
           fi

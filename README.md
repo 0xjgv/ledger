@@ -1,6 +1,6 @@
 # ledger
 
-A per-repo record of work for a driver agent (chief of staff) and its leads: tasks, who leads them, their state, messages, and one inbox. It records facts and never acts: no launching, waking, or verifying agents. It needs only git and Python 3.11+.
+A per-repo record of work for a driver agent (chief of staff) and its leads: tasks, who leads them, their state, messages, and one inbox. It records facts and never acts: no launching, waking, or verifying agents. It needs only git and Python 3.11+ (the installer gets Python through uv).
 
 - Store: append-only `events.jsonl` under `git rev-parse --git-common-dir`/ledger, written under a lock. `LEDGER_DIR=/abs/dir` uses that directory instead, from any cwd; its parent must exist.
 - Names: `--as <name>` or `LEDGER_AS`; the default is `driver`. Nothing checks them.
@@ -25,13 +25,13 @@ Add `--json` to any command for machine output. Logs from 0.1 and 0.2 still load
 
 ## Install
 
-Needs Python 3.11 or newer.
+Needs [uv](https://docs.astral.sh/uv/); uv downloads Python 3.11+ if none is installed.
 
 ```sh
 curl -fsSL https://github.com/0xjgv/ledger/releases/latest/download/install.sh | sh
 ```
 
-It verifies the release archive's SHA-256, unpacks it under `~/.local/share/ledger`, and links `~/.local/bin/ledger`. Pin a version with `LEDGER_VERSION=v0.3.0`.
+It verifies the release wheel's SHA-256, keeps it under `~/.local/share/ledger/releases`, and installs it with `uv tool install`; the `ledger` command lands in `uv tool dir --bin` (usually `~/.local/bin`). Pin a version with `LEDGER_VERSION=v0.3.0`. It replaces the unpacked layout older releases used. Uninstall with `uv tool uninstall ledger`.
 
 Update in place: `ledger update` (or `ledger update v0.3.0`). It checks the release's `install.sh` against `checksums.txt`, then runs it.
 
@@ -39,6 +39,6 @@ Update in place: `ledger update` (or `ledger update v0.3.0`). It checks the rele
 
 ```sh
 make test               # unit and installer tests
-make package            # dist/: archive, install.sh, checksums.txt
+make package            # dist/: wheel, install.sh, checksums.txt
 make release BUMP=minor # bump, commit, tag, push; CI publishes the release
 ```

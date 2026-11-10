@@ -12,7 +12,7 @@ from pathlib import Path
 from . import __version__
 
 REPO = "0xjgv/ledger"
-ARCHIVE = re.compile(r"ledger-(\d+\.\d+\.\d+)\.tar\.gz")
+WHEEL = re.compile(r"ledger-(\d+\.\d+\.\d+)-py3-none-any\.whl")
 
 
 def _key(version):
@@ -44,7 +44,7 @@ def update(version=None):
         return 1
     expected = next((line.split()[0] for line in sums.splitlines()
                      if line.split()[1:] and line.split()[1].lstrip("*") == "install.sh"), None)
-    latest = next((m.group(1) for m in map(ARCHIVE.search, sums.splitlines()) if m), None)
+    latest = next((m.group(1) for m in map(WHEEL.search, sums.splitlines()) if m), None)
     if not version and latest and _key(latest) < _key(__version__):
         print(f"ledger update: latest is {latest}, you have {__version__}. "
               f"To install it anyway: ledger update v{latest}", file=sys.stderr)
