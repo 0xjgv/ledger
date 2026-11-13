@@ -17,6 +17,7 @@ ledger answer 4 "merge"                             # --as human
 ledger inbox [--for human | --all] [--wait [--after SEQ]]  # ends with "head: SEQ"; --after waits past it
 ledger board [--all]
 ledger show login | ledger show 4
+ledger stats [--where sha=abc123 ...]               # cycle time, time in state, reworks, blocks, answer waits
 ```
 
 Re-arm a wait without a gap: pass the last `head:` (or `board --json`'s `"head"`) as `--after`; old open items no longer wake you, new ones and unseen answers do.

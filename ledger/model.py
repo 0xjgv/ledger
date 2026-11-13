@@ -17,6 +17,7 @@ class State:
         self.tasks = {}    # id -> task
         self.items = {}    # seq -> inbox item
         self.history = {}  # task id -> events
+        self.moves = {}    # task id -> [(at, state)] each time its state changed, from creation
         self.head = 0      # last seq folded
 
     def inbox(self, name=None):
@@ -29,6 +30,7 @@ def fold(events):
     s = State()
     for e in events:
         s.head = e["seq"]
+        before = s.tasks.get(e.get("task"), {}).get("state")
         if e.get("v") == 3:
             _apply(s, e)
         else:
@@ -36,6 +38,8 @@ def fold(events):
         if e.get("task") in s.tasks:
             s.tasks[e["task"]]["updated"] = e["at"]
             s.history.setdefault(e["task"], []).append(e)
+            if s.tasks[e["task"]]["state"] != before:
+                s.moves.setdefault(e["task"], []).append((e["at"], s.tasks[e["task"]]["state"]))
     return s
 
 
