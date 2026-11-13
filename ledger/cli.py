@@ -74,12 +74,13 @@ def wait_for(store, done, timeout):
 
 
 def parse_pairs(pairs):
-    fields = {}
+    """[(key, value)] in order; repeats kept."""
+    out = []
     for pair in pairs:
         key, eq, value = pair.partition("=")
         need(eq and NAME.match(key), "bad_field", f"Expected key=value, got: {pair}")
-        fields[key] = value
-    return fields
+        out.append((key, value))
+    return out
 
 
 def mark_seen(store, actor, items):
@@ -104,7 +105,7 @@ def cmd_new(store, a):
 
 
 def cmd_set(store, a):
-    fields = parse_pairs(a.pairs)
+    fields = dict(parse_pairs(a.pairs))
     if fields.get("lead"):
         need(NAME.match(fields["lead"]), "bad_name", f"Bad lead name: {fields['lead']}")
 
@@ -200,7 +201,7 @@ def cmd_stats(store, a):
 
     tasks = []
     for t in s.tasks.values():
-        if any(value(t, k) != v for k, v in where.items()):
+        if any(value(t, k) != v for k, v in where):
             continue
         moves = s.moves[t["id"]]  # starts with the task's creation
         ended = moves[-1][0] if t["state"] in model.ENDED else None

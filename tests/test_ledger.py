@@ -248,6 +248,7 @@ class Ledger(unittest.TestCase):
         self.assertEqual(only["summary"]["wait_median_s"], {"human": 240})
         self.assertEqual(self.json("stats", "--where", "lead=y", "--where", "state=active")["summary"]["count"], 1)
         self.assertEqual(self.json("stats", "--where", "lead=y", "--where", "state=done")["tasks"], [])
+        self.assertEqual(self.json("stats", "--where", "lead=x", "--where", "lead=y")["tasks"], [])
         text = self.run_l("stats").stdout
         self.assertIn("tasks 2, ended 1, cycle median 21m max 21m, reworks 1", text)
         self.assertIn("wait median: human 3m (2)", text)
