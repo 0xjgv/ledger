@@ -202,6 +202,61 @@ class Ledger(unittest.TestCase):
         r = subprocess.run(hook, input=payload, env=self.env, capture_output=True, text=True)
         self.assertEqual((r.returncode, r.stdout), (0, ""))
 
+    def write_log(self, events):
+        (self.repo / ".git/ledger").mkdir()
+        (self.repo / ".git/ledger/events.jsonl").write_text(
+            "".join(json.dumps({"seq": n, "v": 3, "actor": "driver", **e}) + "\n" for n, e in enumerate(events, 1)))
+
+    def test_stats(self):
+        def at(minutes):
+            return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(start + minutes * 60))
+
+        def move(minutes, task, **fields):
+            return {"at": at(minutes), "kind": "set", "task": task, "fields": fields}
+        start = time.time() // 60 * 60 - 3600
+        self.write_log([
+            {"at": at(0), "kind": "new", "task": "a", "title": "A", "lead": "x"},
+            move(1, "a", state="active", sha="s1"),
+            move(3, "a", state="blocked"),
+            move(4, "a", state="active"),
+            move(10, "a", state="review"),
+            move(12, "a", state="active"),
+            move(15, "a", state="review"),
+            {"at": at(16), "kind": "ask", "task": "a", "to": "human", "text": "merge?"},
+            {"at": at(20), "kind": "answer", "item": 8, "task": "a", "text": "yes", "actor": "human"},
+            move(21, "a", state="done"),
+            {"at": at(5), "kind": "new", "task": "b", "title": "B", "lead": "y"},
+            move(6, "b", state="active", sha="s2"),
+            {"at": at(7), "kind": "ask", "task": "b", "to": "human", "text": "db?"},
+            {"at": at(9), "kind": "answer", "item": 13, "task": "b", "text": "pg", "actor": "human"},
+            {"at": at(8), "kind": "ask", "task": None, "to": "driver", "text": "unanswered"},
+        ])
+        out = self.json("stats")
+        a, b = out["tasks"]
+        self.assertEqual((a["ended"], a["cycle_s"], a["reworks"], a["blocks"]), (at(21), 21 * 60, 1, 1))
+        self.assertEqual(a["in_state"], {"todo": 60, "active": 11 * 60, "blocked": 60, "review": 8 * 60,
+                                         "done": 0, "dropped": 0})
+        self.assertIsNone(b["ended"])
+        self.assertTrue(55 * 60 <= b["cycle_s"] < 57 * 60, b["cycle_s"])
+        self.assertEqual(sum(b["in_state"].values()), b["cycle_s"])
+        self.assertEqual({to: [w["wait_s"] for w in ws] for to, ws in out["waits"].items()}, {"human": [240, 120]})
+        self.assertEqual(out["summary"], {"count": 2, "ended": 1, "cycle_median_s": 21 * 60, "cycle_max_s": 21 * 60,
+                                          "reworks": 1, "wait_median_s": {"human": 180}})
+
+        only = self.json("stats", "--where", "sha=s1")
+        self.assertEqual(([t["id"] for t in only["tasks"]], only["summary"]["count"]), (["a"], 1))
+        self.assertEqual(only["summary"]["wait_median_s"], {"human": 240})
+        self.assertEqual(self.json("stats", "--where", "lead=y", "--where", "state=active")["summary"]["count"], 1)
+        self.assertEqual(self.json("stats", "--where", "lead=y", "--where", "state=done")["tasks"], [])
+        text = self.run_l("stats").stdout
+        self.assertIn("tasks 2, ended 1, cycle median 21m max 21m, reworks 1", text)
+        self.assertIn("wait median: human 3m (2)", text)
+        self.assertIn("key=value", self.run_l("stats", "--where", "oops", ok=False).stderr)
+
+    def test_stats_empty(self):
+        self.assertIn("tasks 0, ended 0, cycle median - max -", self.run_l("stats").stdout)
+        self.assertEqual(self.json("stats")["summary"]["cycle_median_s"], None)
+
 
 def v2(seq, kind, **fields):
     return {"seq": seq, "at": "2026-11-09T00:00:00Z", "kind": kind, **fields}
@@ -234,6 +289,7 @@ class Migration(unittest.TestCase):
         self.assertEqual(s.items[10]["to"], "sol")
         s = model.fold([v2(1, "new", task="t", title="T", reqs=[]), v2(2, "close", task="t")])
         self.assertEqual(s.tasks["t"]["state"], "done")
+        self.assertEqual(s.moves["t"], [("2026-11-09T00:00:00Z", "todo"), ("2026-11-09T00:00:00Z", "done")])
 
 
 if __name__ == "__main__":

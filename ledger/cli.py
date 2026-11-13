@@ -3,9 +3,11 @@ import argparse
 import json
 import os
 import re
+import statistics
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 from . import __version__, model
@@ -71,6 +73,15 @@ def wait_for(store, done, timeout):
         time.sleep(2)
 
 
+def parse_pairs(pairs):
+    fields = {}
+    for pair in pairs:
+        key, eq, value = pair.partition("=")
+        need(eq and NAME.match(key), "bad_field", f"Expected key=value, got: {pair}")
+        fields[key] = value
+    return fields
+
+
 def mark_seen(store, actor, items):
     """Record that actor has read the answers to its own asks among items."""
     ns = [i["n"] for i in items if i["status"] == "answered" and i["from"] == actor and not i["seen"]]
@@ -93,11 +104,7 @@ def cmd_new(store, a):
 
 
 def cmd_set(store, a):
-    fields = {}
-    for pair in a.pairs:
-        key, eq, value = pair.partition("=")
-        need(eq and NAME.match(key), "bad_field", f"Expected key=value, got: {pair}")
-        fields[key] = value
+    fields = parse_pairs(a.pairs)
     if fields.get("lead"):
         need(NAME.match(fields["lead"]), "bad_name", f"Bad lead name: {fields['lead']}")
 
@@ -181,6 +188,57 @@ def cmd_show(store, a):
     return {**t, "history": history}, "\n".join(head + [""] + [render_event(e) for e in history])
 
 
+def cmd_stats(store, a):
+    s, now = load(store)[0], time.time()
+    where = parse_pairs(a.where)
+
+    def secs(at):
+        return datetime.fromisoformat(at).timestamp()
+
+    def value(t, key):
+        return t[key] if key in ("lead", "state") else t["fields"].get(key)
+
+    tasks = []
+    for t in s.tasks.values():
+        if any(value(t, k) != v for k, v in where.items()):
+            continue
+        moves = s.moves[t["id"]]  # starts with the task's creation
+        ended = moves[-1][0] if t["state"] in model.ENDED else None
+        end = secs(ended) if ended else now
+        in_state = dict.fromkeys(model.STATES, 0)
+        for (at, state), (nxt, _) in zip(moves, moves[1:] + [(None, None)]):
+            if nxt or not ended:
+                in_state[state] += round((secs(nxt) if nxt else end) - secs(at))
+        pairs = list(zip(moves, moves[1:]))
+        tasks.append({"id": t["id"], "lead": t["lead"], "state": t["state"], "created": t["created"],
+                      "ended": ended, "cycle_s": round(end - secs(t["created"])), "in_state": in_state,
+                      "reworks": sum(1 for (_, x), (_, y) in pairs if (x, y) == ("review", "active")),
+                      "blocks": sum(1 for _, y in moves if y == "blocked")})
+    ids = {t["id"] for t in tasks}
+    waits = {}
+    for i in s.items.values():
+        if i["status"] == "answered" and (not where or i["task"] in ids):
+            waits.setdefault(i["to"], []).append({"n": i["n"], "task": i["task"], "from": i["from"],
+                                                  "wait_s": round(secs(i["answered"]) - secs(i["at"]))})
+    cycles = [t["cycle_s"] for t in tasks if t["ended"]]
+    summary = {"count": len(tasks), "ended": len(cycles),
+               "cycle_median_s": statistics.median(cycles) if cycles else None,
+               "cycle_max_s": max(cycles, default=None), "reworks": sum(t["reworks"] for t in tasks),
+               "wait_median_s": {to: statistics.median(w["wait_s"] for w in ws) for to, ws in waits.items()}}
+
+    lines = [f"{'TASK':<24} {'STATE':<8} {'LEAD':<16} {'CYCLE':>7} {'TODO':>7} {'ACTIVE':>7} {'BLOCKED':>7} "
+             f"{'REVIEW':>7} {'REWORKS':>7} {'BLOCKS':>6}"]
+    lines += [f"{t['id']:<24} {t['state']:<8} {t['lead'] or '-':<16} {duration(t['cycle_s']):>7} "
+              + " ".join(f"{duration(t['in_state'][k]):>7}" for k in ("todo", "active", "blocked", "review"))
+              + f" {t['reworks']:>7} {t['blocks']:>6}" for t in tasks]
+    lines.append(f"tasks {summary['count']}, ended {summary['ended']}, cycle median "
+                 f"{duration(summary['cycle_median_s'])} max {duration(summary['cycle_max_s'])}, "
+                 f"reworks {summary['reworks']}")
+    lines.append("wait median: " + (", ".join(f"{to or '-'} {duration(m)} ({len(waits[to])})"
+                                             for to, m in summary["wait_median_s"].items()) or "no answers"))
+    return {"tasks": tasks, "waits": waits, "summary": summary, "head": s.head}, "\n".join(lines)
+
+
 def cmd_version(store, a):
     return {"version": __version__}, __version__
 
@@ -194,6 +252,16 @@ def render_item(i):
     if i["status"] != "open":
         lines.append(f"    {i['status']} by {i['by']}: {i['answer']}")
     return "\n".join(lines)
+
+
+def duration(seconds):
+    if seconds is None:
+        return "-"
+    seconds = round(seconds)
+    for unit, size, sub, subsize in (("d", 86400, "h", 3600), ("h", 3600, "m", 60), ("m", 60, "s", 1)):
+        if seconds >= size:
+            return f"{seconds // size}{unit}" + (f"{seconds % size // subsize}{sub}" if seconds % size >= subsize else "")
+    return f"{seconds}s"
 
 
 def render_event(e):
@@ -259,6 +327,9 @@ def parser():
         A("--after", type=int, default=0, help="with --wait: wake only for items numbered above SEQ, or answers"))
     add("board", cmd_board, "tasks and inbox counts", A("--all", action="store_true", help="include done and dropped"))
     add("show", cmd_show, "a task's history, or one item (#n)", A("ref"))
+    add("stats", cmd_stats, "cycle time, time in state, reworks, blocks, and answer waits from the log",
+        A("--where", action="append", default=[], metavar="KEY=VALUE",
+          help="only tasks whose field, lead, or state matches (repeat to AND)"))
     add("version", cmd_version, "print the version")
     sub.add_parser("update", help="install the latest or a given release").add_argument("version", nargs="?")
     return p
