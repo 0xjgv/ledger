@@ -18,7 +18,10 @@ ledger inbox [--for human | --all] [--wait [--after SEQ]]  # ends with "head: SE
 ledger board [--all]
 ledger show login | ledger show 4
 ledger stats [--where sha=abc123 ...]               # cycle time, time in state, reworks, blocks, answer waits
+ledger recall [text] [--tag decision ...]           # tagged notes by task; default decision, lesson, assumption
 ```
+
+Tag a note that should outlive the task by starting it with `decision:`, `lesson:` or `assumption:`. `recall` reads only tagged notes, so untagged progress messages stay in `show` and out of recall.
 
 Re-arm a wait without a gap: pass the last `head:` (or `board --json`'s `"head"`) as `--after`; old open items no longer wake you, new ones and unseen answers do.
 

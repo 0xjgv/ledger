@@ -240,6 +240,29 @@ def cmd_stats(store, a):
     return {"tasks": tasks, "waits": waits, "summary": summary, "head": s.head}, "\n".join(lines)
 
 
+def cmd_recall(store, a):
+    """Tagged notes (decisions, lessons, assumptions by default), grouped by task; untagged narration is left out."""
+    s, events, _ = load(store)
+    tags, words = set(a.tag or model.RECALL_TAGS), (a.text or "").lower()
+    notes = []
+    for e in events:
+        if e.get("kind") != "say" or e.get("task") not in s.tasks:
+            continue
+        tag, text = model.tag_of(e.get("text"))
+        t = s.tasks[e["task"]]
+        if tag in tags and words in f"{e['task']} {t['title']} {text}".lower():
+            notes.append({"seq": e["seq"], "at": e["at"], "actor": e.get("actor"), "task": e["task"], "tag": tag,
+                          "text": text})
+    tasks = {n["task"]: {"title": s.tasks[n["task"]]["title"], "state": s.tasks[n["task"]]["state"],
+                         "pr": s.tasks[n["task"]]["fields"].get("pr")} for n in notes}
+    lines = []
+    for tid, t in tasks.items():
+        lines.append(f"{tid} ({t['state']}) {t['title']}" + (f" {t['pr']}" if t["pr"] else ""))
+        lines += [f"  #{n['seq']} {n['at'][:10]} {n['actor'] or '-'} {n['tag']}: {n['text']}" for n in notes
+                  if n["task"] == tid]
+    return {"notes": notes, "tasks": tasks, "head": s.head}, "\n".join(lines) or "nothing recalled"
+
+
 def cmd_version(store, a):
     return {"version": __version__}, __version__
 
@@ -331,6 +354,9 @@ def parser():
     add("stats", cmd_stats, "cycle time, time in state, reworks, blocks, and answer waits from the log",
         A("--where", action="append", default=[], metavar="KEY=VALUE",
           help="only tasks whose field, lead, or state matches (repeat to AND)"))
+    add("recall", cmd_recall, "decisions, lessons and assumptions from tagged notes, grouped by task",
+        A("text", nargs="?", help="only notes whose text, task id or title contains this"),
+        A("--tag", action="append", help=f"note tag to read, repeatable (default: {', '.join(model.RECALL_TAGS)})"))
     add("version", cmd_version, "print the version")
     sub.add_parser("update", help="install the latest or a given release").add_argument("version", nargs="?")
     return p

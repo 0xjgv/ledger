@@ -254,6 +254,30 @@ class Ledger(unittest.TestCase):
         self.assertIn("wait median: human 3m (2)", text)
         self.assertIn("key=value", self.run_l("stats", "--where", "oops", ok=False).stderr)
 
+    def test_recall_reads_tagged_notes_only(self):
+        self.run_l("new", "login", "Fix login")
+        self.run_l("set", "login", "pr=https://x/pull/7")
+        self.run_l("say", "login", "running the suite again")
+        self.run_l("say", "login", "Decision: keep sessions in Postgres", who="ana")
+        self.run_l("say", "login", "lesson: the cookie TTL hid the bug")
+        self.run_l("say", "login", "status: waiting on CI")
+        self.run_l("new", "cache", "Cache reads")
+        self.run_l("say", "cache", "decision: no Redis on-prem")
+        out = self.json("recall")
+        self.assertEqual([(n["task"], n["tag"], n["text"]) for n in out["notes"]], [
+            ("login", "decision", "keep sessions in Postgres"), ("login", "lesson", "the cookie TTL hid the bug"),
+            ("cache", "decision", "no Redis on-prem")])
+        self.assertEqual(out["tasks"]["login"], {"title": "Fix login", "state": "todo", "pr": "https://x/pull/7"})
+        self.assertEqual([n["text"] for n in self.json("recall", "postgres")["notes"]], ["keep sessions in Postgres"])
+        self.assertEqual([n["task"] for n in self.json("recall", "cache")["notes"]], ["cache"])  # task id matches
+        self.assertEqual([n["tag"] for n in self.json("recall", "--tag", "status")["notes"]], ["status"])
+        self.assertEqual(self.json("recall", "--tag", "lesson", "redis")["notes"], [])
+        text = self.run_l("recall").stdout
+        self.assertIn("login (todo) Fix login https://x/pull/7", text)
+        self.assertIn("ana decision: keep sessions in Postgres", text)
+        self.assertNotIn("running the suite", text)
+        self.assertIn("nothing recalled", self.run_l("recall", "nope").stdout)
+
     def test_stats_empty(self):
         self.assertIn("tasks 0, ended 0, cycle median - max -", self.run_l("stats").stdout)
         self.assertEqual(self.json("stats")["summary"]["cycle_median_s"], None)

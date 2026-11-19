@@ -1,4 +1,5 @@
 """Fold the event log into tasks and inbox items. Reads 0.2 logs too."""
+import re
 
 STATES = ("todo", "active", "blocked", "review", "done", "dropped")
 FLOW = {
@@ -10,6 +11,15 @@ FLOW = {
     "dropped": {"todo"},
 }
 ENDED = ("done", "dropped")
+# A note's tag is the word or two before its first colon ("decision: ..."); recall reads these by default.
+RECALL_TAGS = ("decision", "lesson", "assumption")
+TAG = re.compile(r"^\s*([A-Za-z][A-Za-z ]{0,18}):\s*")
+
+
+def tag_of(text):
+    """(tag, rest) for a tagged note, else (None, text)."""
+    m = TAG.match(text or "")
+    return (m.group(1).lower(), text[m.end():]) if m else (None, text)
 
 
 class State:
