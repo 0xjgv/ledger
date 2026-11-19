@@ -24,7 +24,7 @@ ledger recall [text] [--tag decision ...]           # tagged notes by task; defa
 
 Tag a note that should outlive the task by starting it with `decision:`, `lesson:` or `assumption:`. `recall` reads only tagged notes, so untagged progress messages stay in `show` and out of recall.
 
-`ask --key KEY` makes a retry safe: under the write lock, if an open item has the key, `ask` prints that item instead of opening a new one and exits 0; `--json` adds `"existing": true` (`false` when it opened one). Once that item is answered or closed, the key opens a new item, so put recurrence in the key (a SHA, a date). Keys are opaque: 1-128 of `A-Z a-z 0-9 . _ : / @ # + = -`, starting with a letter or digit. `show #n` and `--json` include the key.
+`ask --key KEY` makes a retry safe: under the write lock, if an open item has the key, `ask` prints that item (`#4 asked driver (already open, key ...)`) instead of opening a new one and exits 0; `--json` adds `"existing": true` (`false` when it opened one). The open item must have the same task and recipient, else `ask` refuses with `key_conflict`. Once that item is answered or closed, the key opens a new item, so put recurrence in the key (a SHA, a date). Keys are opaque: 1-128 of `A-Z a-z 0-9 . _ : / @ # + = -`, starting with a letter or digit. `show #n` and `--json` include the key.
 
 Re-arm a wait without a gap: pass the last `head:` (or `board --json`'s `"head"`) as `--after`; old open items no longer wake you, new ones and unseen answers do.
 

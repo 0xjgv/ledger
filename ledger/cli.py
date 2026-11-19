@@ -52,7 +52,7 @@ def write(store, actor, build):
     with store.lock():
         s, events, torn = load(store)
         fields = build(s)
-        return fields and store.append(events, torn, {"v": 3, "actor": actor, **fields})
+        return None if fields is None else store.append(events, torn, {"v": 3, "actor": actor, **fields})
 
 
 def task_of(s, tid):
@@ -131,23 +131,28 @@ def cmd_say(store, a):
 def cmd_ask(store, a):
     need(NAME.match(a.to), "bad_name", f"Bad recipient: {a.to}")
     need(a.key is None or KEY.match(a.key), "bad_key",
-         "Keys are 1-128 of A-Z a-z 0-9 . _ : / @ # + = -, starting with a letter or digit.")
+         f"Bad key: {a.key!r}. Keys are 1-128 of A-Z a-z 0-9 . _ : / @ # + = -, starting with a letter or digit.")
     task, found = None if a.task == "-" else a.task, []
 
     def build(s):
-        found.extend(i["n"] for i in s.items.values() if a.key and i["key"] == a.key and i["status"] == "open")
-        if found:
-            return None
         if task:
             t = task_of(s, task)
             need(t["state"] not in model.ENDED, "task_ended", f"Task {task} is {t['state']}.")
+        if open_ := [i for i in s.items.values() if a.key and i["key"] == a.key and i["status"] == "open"]:
+            i = open_[0]
+            need((i["task"], i["to"]) == (task, a.to), "key_conflict",
+                 f"Key {a.key} is on open item #{i['n']} for task {i['task'] or '-'} to {i['to']}.")
+            found.append(i["n"])
+            return None  # already open: append nothing
         return {"kind": "ask", "task": task, "to": a.to, "text": a.text, "options": a.option,
                 **({"key": a.key} if a.key else {})}
-    e = write(store, a.actor, build) or load(store)[1][found[0] - 1]
-    if a.key:
-        e = {**e, "existing": bool(found)}
+    e = write(store, a.actor, build)
+    if found:  # the open item's ask event; Store.read guarantees events[seq - 1] has that seq
+        e = {**load(store)[1][found[0] - 1], "existing": True}
+    elif a.key:
+        e = {**e, "existing": False}
     if not a.wait:
-        return e, f"#{e['seq']} asked {a.to}"
+        return e, f"#{e['seq']} asked {e['to']}" + (f" (already open, key {a.key})" if found else "")
     item = wait_for(store, lambda s: s.items[e["seq"]]["status"] != "open", a.timeout).items[e["seq"]]
     mark_seen(store, a.actor, [item])
     return item, render_item(item)
@@ -305,7 +310,8 @@ def render_event(e):
     body = {"new": lambda: f"created: {e.get('title')}",
             "set": lambda: "set " + " ".join(f"{k2}={v}" for k2, v in e.get("fields", {}).items()),
             "say": lambda: e.get("text"),
-            "ask": lambda: f"ask #{e['seq']} → {e.get('to')}: {e.get('text')}",
+            "ask": lambda: f"ask #{e['seq']} → {e.get('to')}: {e.get('text')}"
+                           + (f" (key {e['key']})" if e.get("key") else ""),
             "answer": lambda: f"answer #{e.get('item')}: {e.get('text')}"}.get(k)
     text = body() if body and e.get("v") == 3 else f"{k} " + (e.get("text") or e.get("question") or e.get("why") or e.get("name") or "")
     return f"#{e['seq']} {e['at']} {e.get('actor') or '-'}: {text}".rstrip()
