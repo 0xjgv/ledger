@@ -14,6 +14,7 @@ from . import __version__, model
 from .store import Store, Corrupt
 
 NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@#+=-]{0,127}$")
 
 
 class Refuse(Exception):
@@ -47,10 +48,11 @@ def load(store):
 
 
 def write(store, actor, build):
-    """Lock, fold, check via build(state) -> event fields, append."""
+    """Lock, fold, check via build(state) -> event fields, append. build returning None appends nothing."""
     with store.lock():
         s, events, torn = load(store)
-        return store.append(events, torn, {"v": 3, "actor": actor, **build(s)})
+        fields = build(s)
+        return None if fields is None else store.append(events, torn, {"v": 3, "actor": actor, **fields})
 
 
 def task_of(s, tid):
@@ -128,19 +130,32 @@ def cmd_say(store, a):
 
 def cmd_ask(store, a):
     need(NAME.match(a.to), "bad_name", f"Bad recipient: {a.to}")
-    task = None if a.task == "-" else a.task
+    need(a.key is None or KEY.fullmatch(a.key), "bad_key",
+         f"Bad key: {a.key!r}. Keys are 1-128 of A-Z a-z 0-9 . _ : / @ # + = -, starting with a letter or digit.")
+    task, found = None if a.task == "-" else a.task, []
 
     def build(s):
         if task:
             t = task_of(s, task)
             need(t["state"] not in model.ENDED, "task_ended", f"Task {task} is {t['state']}.")
-        return {"kind": "ask", "task": task, "to": a.to, "text": a.text, "options": a.option}
+        if open_ := [i for i in s.items.values() if a.key and i["key"] == a.key and i["status"] == "open"]:
+            i = open_[0]
+            need((i["task"], i["to"]) == (task, a.to), "key_conflict",
+                 f"Key {a.key} is on open item #{i['n']} for task {i['task'] or '-'} to {i['to']}.")
+            found.append(i["n"])
+            return None  # already open: append nothing
+        return {"kind": "ask", "task": task, "to": a.to, "text": a.text, "options": a.option,
+                **({"key": a.key} if a.key else {})}
     e = write(store, a.actor, build)
+    if found:  # the open item's ask event; Store.read guarantees events[seq - 1] has that seq
+        e = {**load(store)[1][found[0] - 1], "existing": True}
+    elif a.key:
+        e = {**e, "existing": False}
     if not a.wait:
-        return e, f"#{e['seq']} asked {a.to}"
+        return e, f"#{e['seq']} asked {e['to']}" + (f" (already open, key {a.key})" if found else "")
     item = wait_for(store, lambda s: s.items[e["seq"]]["status"] != "open", a.timeout).items[e["seq"]]
     mark_seen(store, a.actor, [item])
-    return item, render_item(item)
+    return {**item, **({"existing": e["existing"]} if a.key else {})}, render_item(item)
 
 
 def cmd_answer(store, a):
@@ -273,6 +288,8 @@ def render_item(i):
     task = f" [{i['task']}]" if i["task"] else ""
     lines = [f"#{i['n']}{task} {i['from']} → {i['to']} ({i['at']}): {i['text']}"]
     lines += [f"    option {o}" for o in i["options"]]
+    if i["key"]:
+        lines.append(f"    key {i['key']}")
     if i["status"] != "open":
         lines.append(f"    {i['status']} by {i['by']}: {i['answer']}")
     return "\n".join(lines)
@@ -293,7 +310,8 @@ def render_event(e):
     body = {"new": lambda: f"created: {e.get('title')}",
             "set": lambda: "set " + " ".join(f"{k2}={v}" for k2, v in e.get("fields", {}).items()),
             "say": lambda: e.get("text"),
-            "ask": lambda: f"ask #{e['seq']} → {e.get('to')}: {e.get('text')}",
+            "ask": lambda: f"ask #{e['seq']} → {e.get('to')}: {e.get('text')}"
+                           + (f" (key {e['key']})" if e.get("key") else ""),
             "answer": lambda: f"answer #{e.get('item')}: {e.get('text')}"}.get(k)
     text = body() if body and e.get("v") == 3 else f"{k} " + (e.get("text") or e.get("question") or e.get("why") or e.get("name") or "")
     return f"#{e['seq']} {e['at']} {e.get('actor') or '-'}: {text}".rstrip()
@@ -344,7 +362,8 @@ def parser():
     add("set", cmd_set, "set state, lead, title, or any field (key= clears)", A("task"), A("pairs", nargs="+"))
     add("say", cmd_say, "post a message on a task", A("task"), A("text"))
     add("ask", cmd_ask, "open an inbox item on a task (or - for none)", A("task"), A("text"),
-        A("--to", default="driver"), A("--option", action="append", default=[], help='"id: description"'), *wait)
+        A("--to", default="driver"), A("--option", action="append", default=[], help='"id: description"'),
+        A("--key", help="idempotency key: if an open item has it, return that item instead of a new one"), *wait)
     add("answer", cmd_answer, "answer and close an inbox item", A("item", type=lambda v: int(v.lstrip("#"))), A("text"))
     add("inbox", cmd_inbox, "open items for you, and new answers to your asks", A("--for", dest="name"),
         A("--all", action="store_true"), *wait,

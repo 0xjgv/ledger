@@ -91,7 +91,7 @@ def _set(s, e, fields):
 def _ask(s, e, to, text, options):
     s.items[e["seq"]] = {"n": e["seq"], "task": e.get("task"), "from": e.get("actor"), "to": to, "text": text,
                          "options": options, "at": e["at"], "status": "open", "answer": None, "by": None,
-                         "seen": False}
+                         "seen": False, "key": e.get("key")}
 
 
 def _answer(s, e, n, text, seen=False):
