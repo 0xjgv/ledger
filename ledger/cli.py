@@ -130,7 +130,7 @@ def cmd_say(store, a):
 
 def cmd_ask(store, a):
     need(NAME.match(a.to), "bad_name", f"Bad recipient: {a.to}")
-    need(a.key is None or KEY.match(a.key), "bad_key",
+    need(a.key is None or KEY.fullmatch(a.key), "bad_key",
          f"Bad key: {a.key!r}. Keys are 1-128 of A-Z a-z 0-9 . _ : / @ # + = -, starting with a letter or digit.")
     task, found = None if a.task == "-" else a.task, []
 

@@ -303,6 +303,7 @@ class Ledger(unittest.TestCase):
         self.assertEqual(self.json("ask", "-", "other", "--key", "hb:x:2")["seq"], 6)
         self.assertIn("Keys are", self.run_l("ask", "x", "a", "--key", "bad key", ok=False).stderr)
         self.assertIn("Keys are", self.run_l("ask", "x", "a", "--key", "k" * 129, ok=False).stderr)
+        self.assertIn("Keys are", self.run_l("ask", "x", "a", "--key", "k1\n", ok=False).stderr)
 
     def test_ask_without_key_is_unchanged(self):
         self.run_l("new", "x", "X")
