@@ -155,7 +155,7 @@ def cmd_ask(store, a):
         return e, f"#{e['seq']} asked {e['to']}" + (f" (already open, key {a.key})" if found else "")
     item = wait_for(store, lambda s: s.items[e["seq"]]["status"] != "open", a.timeout).items[e["seq"]]
     mark_seen(store, a.actor, [item])
-    return item, render_item(item)
+    return {**item, **({"existing": e["existing"]} if a.key else {})}, render_item(item)
 
 
 def cmd_answer(store, a):
