@@ -282,6 +282,37 @@ class Ledger(unittest.TestCase):
         self.assertIn("tasks 0, ended 0, cycle median - max -", self.run_l("stats").stdout)
         self.assertEqual(self.json("stats")["summary"]["cycle_median_s"], None)
 
+    def test_ask_key_dedupes_open_items(self):
+        self.run_l("new", "x", "X")
+        first = self.json("ask", "x", "alert", "--key", "hb:x:1")
+        again = self.json("ask", "x", "alert", "--key", "hb:x:1")
+        self.assertEqual((first["seq"], first["existing"], again["seq"], again["existing"]), (2, False, 2, True))
+        self.assertEqual(self.run_l("ask", "x", "alert", "--key", "hb:x:1").stdout, "#2 asked driver\n")
+        self.assertEqual([e["kind"] for e in self.log()], ["new", "ask"])
+        self.assertEqual(self.json("show", "#2")["key"], "hb:x:1")
+        self.assertIn("    key hb:x:1", self.run_l("show", "2").stdout)
+        self.run_l("answer", "2", "seen")
+        self.assertEqual(self.json("ask", "x", "alert", "--key", "hb:x:1")["seq"], 4)
+        self.assertEqual(self.json("ask", "-", "other", "--key", "hb:x:2")["seq"], 5)
+        self.assertIn("Keys are", self.run_l("ask", "x", "a", "--key", "bad key", ok=False).stderr)
+        self.assertIn("Keys are", self.run_l("ask", "x", "a", "--key", "k" * 129, ok=False).stderr)
+
+    def test_ask_without_key_is_unchanged(self):
+        self.run_l("new", "x", "X")
+        a, b = self.json("ask", "x", "q"), self.json("ask", "x", "q")
+        self.assertEqual((a["seq"], b["seq"]), (2, 3))
+        self.assertFalse({"key", "existing"} & (a.keys() | self.log()[1].keys()))
+        self.assertIsNone(self.json("show", "2")["key"])
+
+    def test_ask_key_concurrent_processes(self):
+        self.run_l("new", "x", "X")
+        cmd = [sys.executable, str(ROOT / "bin/ledger"), "ask", "x", "alert", "--key", "k1", "--json"]
+        ps = [subprocess.Popen(cmd, cwd=self.repo, env=self.env, stdout=subprocess.PIPE, text=True) for _ in range(6)]
+        outs = [json.loads(p.communicate(timeout=20)[0]) for p in ps]
+        self.assertEqual({o["seq"] for o in outs}, {2})
+        self.assertEqual(sorted(o["existing"] for o in outs), [False] + [True] * 5)
+        self.assertEqual([e["kind"] for e in self.log()], ["new", "ask"])
+
 
 def v2(seq, kind, **fields):
     return {"seq": seq, "at": "2026-11-09T00:00:00Z", "kind": kind, **fields}
@@ -312,6 +343,7 @@ class Migration(unittest.TestCase):
                          ("human", ["a: first", "b"], "a: simpler"))
         self.assertEqual([i["n"] for i in s.inbox()], [10])
         self.assertEqual(s.items[10]["to"], "sol")
+        self.assertEqual({i["key"] for i in s.items.values()}, {None})
         s = model.fold([v2(1, "new", task="t", title="T", reqs=[]), v2(2, "close", task="t")])
         self.assertEqual(s.tasks["t"]["state"], "done")
         self.assertEqual(s.moves["t"], [("2026-11-09T00:00:00Z", "todo"), ("2026-11-09T00:00:00Z", "done")])
