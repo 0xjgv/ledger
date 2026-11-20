@@ -1,5 +1,7 @@
 # ledger
 
+> **Deprecated: frozen at v0.6.0.** ledger now ships inside [cos](https://github.com/0xjgv/cos) (private), the chief of staff's tools. Installing cos installs both the `cos` and `ledger` commands; `cos ledger <verb>` does the same thing. Existing stores (`events.jsonl`) work unchanged. This repo and its releases stay up, and v0.6.0 stays installable, but nothing new lands here. Do not install both on one machine: this repo's `install.sh` and `ledger update` reinstall standalone ledger and take the `ledger` command back from cos.
+
 A per-repo record of work for a driver agent (chief of staff) and its leads: tasks, who leads them, their state, messages, and one inbox. It records facts and never acts: no launching, waking, or verifying agents. It needs only git and Python 3.11+ (the installer gets Python through uv).
 
 - Store: append-only `events.jsonl` under `git rev-parse --git-common-dir`/ledger, written under a lock. `LEDGER_DIR=/abs/dir` uses that directory instead, from any cwd; its parent must exist.
